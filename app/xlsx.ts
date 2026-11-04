@@ -156,3 +156,27 @@ export async function xlsxToCsv(buf: ArrayBuffer): Promise<string> {
   }
   return lines.join("\n");
 }
+// Возвращает строки листа, имя которого подходит под шаблон (или null, если такого листа нет).
+export async function xlsxSheet(buf: ArrayBuffer, nameRe: RegExp): Promise<string[][] | null> {
+  const zip = readZip(buf);
+  const get = async (name: string) => {
+    const en = zip.get(name);
+    return en ? readText(buf, en) : "";
+  };
+  const shared: string[] = [];
+  for (const m of (await get("xl/sharedStrings.xml")).matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)) {
+    shared.push(textOf(m[1]));
+  }
+  const targets = new Map<string, string>();
+  for (const m of (await get("xl/_rels/workbook.xml.rels")).matchAll(/<Relationship\b[^>]*>/g)) {
+    const id = attr(m[0], "Id");
+    const tg = attr(m[0], "Target");
+    if (id && tg) targets.set(id, "xl/" + tg.replace(/^\/?(xl\/)?/, ""));
+  }
+  for (const m of (await get("xl/workbook.xml")).matchAll(/<sheet\b[^>]*>/g)) {
+    const name = dec(attr(m[0], "name") ?? "");
+    const path = targets.get(attr(m[0], "r:id") ?? "") ?? "";
+    if (nameRe.test(name) && zip.has(path)) return sheetRows(await get(path), shared);
+  }
+  return null;
+}

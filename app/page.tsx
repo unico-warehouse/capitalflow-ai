@@ -1,29 +1,41 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { useEffect, useMemo, useState } from "react";
 import { xlsxToCsv } from "./xlsx";
+import { LoanBlock, loanFromXlsx, loanTips, withLoan, type Loan } from "./loan";
 
 type Tx = { id: string; date: string; desc: string; amount: number; cat: string };
-type Holding = { id: string; name: string; invested: number; value: number };
-type Goal = { id: string; name: string; target: number; saved: number };
-type Data = { txs: Tx[]; inv: Holding[]; crypto: Holding[]; goals: Goal[] };
-type Month = [string, { inc: number; exp: number }];
+type Contrib = { id: string; date: string; name: string; amount: number };
+type Goal = {
+  id: string; name: string; target: number; start: string; deadline: string;
+  contribs: { id: string; date: string; amount: number }[];
+};
+type Data = { txs: Tx[]; inv: Contrib[]; crypto: Contrib[]; goals: Goal[]; loan: Loan | null; file: string | null };
 type Totals = {
-  income: number; expenses: number; cats: [string, number][]; months: Month[];
+  income: number; expenses: number; cats: [string, number][];
+  months: [string, { inc: number; exp: number }][];
   inv: number; crypto: number; saved: number; total: number;
 };
 
-const EMPTY: Data = { txs: [], inv: [], crypto: [], goals: [] };
+const EMPTY: Data = { txs: [], inv: [], crypto: [], goals: [], loan: null, file: null };
 const KEY = "capitalflow-v1";
 const TABS = [
-  ["dash", "Обзор"], ["stmt", "Выписки"], ["exp", "Расходы"], ["inv", "Инвестиции"],
-  ["crypto", "Крипта"], ["goals", "Цели"], ["ai", "Аналитик"],
+  ["dash", "Обзор"], ["exp", "Расходы"], ["inv", "Инвестиции"], ["crypto", "Крипта"],
+  ["goals", "Цели"], ["ai", "Аналитик"], ["stmt", "Загрузка данных"],
 ] as const;
 type TabId = (typeof TABS)[number][0];
+const C = { ink: "#17234d", gold: "#c9a227", pos: "#1e7a4f", neg: "#b3321f" };
+const MN = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+const DAY = 86400000;
 
 const money = (n: number) =>
   new Intl.NumberFormat("pl-PL", { style: "currency", currency: "PLN", maximumFractionDigits: 0 }).format(n);
 const uid = () => Math.random().toString(36).slice(2, 10);
+const today = () => new Date().toISOString().slice(0, 10);
+const mLabel = (k: string) => `${MN[+k.slice(5, 7) - 1] ?? k} ${k.slice(2, 4)}`;
+const toMs = (d: string) => new Date(d + "T00:00:00").getTime();
+const fmtDate = (iso: string) => iso.split("-").reverse().join(".");
 
 const CATS: [string, RegExp][] = [
   ["Продукты", /biedronka|lidl|żabka|zabka|carrefour|auchan|kaufland|dino|stokrotka|lewiatan|spar\b/i],
@@ -73,22 +85,16 @@ function toNumber(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function parseStatement(text: string): { txs: Tx[]; cols: string } | string {
+function parseStatement(text: string): Tx[] | string {
   const rows = parseCSV(text.replace(/^\uFEFF/, ""));
   if (!rows.length) return "Файл пустой.";
   const has = (c: string, keys: string[]) => keys.some((k) => c.toLowerCase().includes(k));
   let hi = rows.findIndex((r) => r.some((c) => has(c, AMOUNT)) && r.some((c) => has(c, DATEK)));
   if (hi < 0) hi = rows.findIndex((r) => r.some((c) => has(c, AMOUNT)));
-  if (hi < 0) {
-    return "Не нашёл в файле таблицу операций: нужны колонки с датой и суммой (например «Дата» и «Сумма» или «Data» и «Kwota»). Проверьте заголовки.";
-  }
-  const headers = rows[hi];
-  const h = headers.map((c) => c.toLowerCase());
+  if (hi < 0) return "Не нашёл в файле таблицу операций: нужны колонки с датой и суммой (например «Дата» и «Сумма» или «Data» и «Kwota»).";
+  const h = rows[hi].map((c) => c.toLowerCase());
   const col = (keys: string[]) => h.findIndex((c) => keys.some((k) => c.includes(k)));
-  const a = col(AMOUNT);
-  const d = col([...DESC, "коммент", "comment"]);
-  const dt = col(DATEK);
-  const cc = col(["категор", "kategori", "category"]);
+  const a = col(AMOUNT), d = col([...DESC, "коммент", "comment"]), dt = col(DATEK), cc = col(["категор", "kategori", "category"]);
   const txs: Tx[] = [];
   for (const r of rows.slice(hi + 1)) {
     const amount = toNumber(r[a] ?? "");
@@ -97,9 +103,7 @@ function parseStatement(text: string): { txs: Tx[]; cols: string } | string {
     const own = cc >= 0 ? (r[cc] ?? "").trim() : "";
     txs.push({ id: uid(), date: dt >= 0 ? (r[dt] ?? "").trim() : "", desc, amount, cat: own || categorize(desc) });
   }
-  if (!txs.length) return "Колонку суммы нашёл, но ни одной операции не распознал.";
-  const cols = `сумма: «${headers[a]}», описание: «${d >= 0 ? headers[d] : "не найдено"}», дата: «${dt >= 0 ? headers[dt] : "не найдена"}», категория: «${cc >= 0 ? headers[cc] : "определена автоматически"}»`;
-  return { txs, cols };
+  return txs.length ? txs : "Колонку суммы нашёл, но ни одной операции не распознал.";
 }
 
 function decode(buf: ArrayBuffer) {
@@ -113,17 +117,66 @@ const monthKey = (d: string) => {
   m = /(\d{2})[-./](\d{2})[-./](\d{4})/.exec(d);
   return m ? `${m[3]}-${m[2]}` : null;
 };
+const cumAt = (items: { date: string; amount: number }[], m: string) =>
+  items.reduce((s, c) => ((monthKey(c.date) ?? "") <= m ? s + c.amount : s), 0);
+const sumOf = (items: { amount: number }[]) => items.reduce((s, c) => s + c.amount, 0);
+const monthsOf = (items: { date: string }[]) =>
+  [...new Set(items.map((x) => monthKey(x.date)).filter((k): k is string => !!k))].sort();
+
+function monthsBetween(a: string, b: string) {
+  const out: string[] = [];
+  let y = +a.slice(0, 4), m = +a.slice(5, 7);
+  const y2 = +b.slice(0, 4), m2 = +b.slice(5, 7);
+  while ((y < y2 || (y === y2 && m <= m2)) && out.length < 36) {
+    out.push(`${y}-${String(m).padStart(2, "0")}`);
+    if (++m > 12) { m = 1; y++; }
+  }
+  return out;
+}
+
+function normalize(raw: any): Data {
+  const d: any = { ...EMPTY, ...raw };
+  const c = (x: any): Contrib => ({ id: x.id ?? uid(), date: x.date ?? today(), name: x.name ?? "", amount: Number(x.amount ?? x.invested ?? 0) });
+  d.inv = (d.inv ?? []).map(c);
+  d.crypto = (d.crypto ?? []).map(c);
+  d.goals = (d.goals ?? []).map((g: any) => ({
+    id: g.id ?? uid(), name: g.name ?? "", target: Number(g.target) || 0, start: g.start ?? today(), deadline: g.deadline ?? "",
+    contribs: g.contribs ?? (g.saved > 0 ? [{ id: uid(), date: today(), amount: g.saved }] : []),
+  }));
+  return d as Data;
+}
+
+function goalStats(g: Goal) {
+  const saved = sumOf(g.contribs);
+  const rest = Math.max(0, g.target - saved);
+  const now = Date.now();
+  const start = toMs(g.start);
+  const avg = saved / Math.max((now - start) / (30.44 * DAY), 1);
+  const pct = g.target > 0 ? Math.min(100, Math.round((saved / g.target) * 100)) : 0;
+  const hasDl = !!g.deadline;
+  const end = hasDl ? toMs(g.deadline) : 0;
+  const frac = hasDl ? Math.min(1, Math.max(0, (now - start) / Math.max(end - start, DAY))) : 0;
+  const planned = g.target * frac;
+  const monthsLeft = hasDl ? Math.max((end - now) / (30.44 * DAY), 0) : 0;
+  const forecast = avg > 0 && rest > 0 ? new Date(now + (rest / avg) * 30.44 * DAY).toISOString().slice(0, 10) : null;
+  return {
+    saved, rest, avg, pct, hasDl, planned, frac, forecast,
+    diff: saved - planned,
+    daysLeft: hasDl ? Math.ceil((end - now) / DAY) : 0,
+    need: hasDl ? (monthsLeft > 0 ? rest / monthsLeft : rest) : 0,
+  };
+}
 
 function buildSummary(data: Data, t: Totals) {
   const L = [
     "Мои финансы (суммы в zł, без названий операций):",
-    `Капитал: ${money(t.total)} (инвестиции ${money(t.inv)}, крипта ${money(t.crypto)}, накопления ${money(t.saved)})`,
+    `Капитал: ${money(t.total)} (инвестиции ${money(t.inv)}, крипта ${money(t.crypto)}, накопления по целям ${money(t.saved)})`,
   ];
   if (t.months.length) L.push("По месяцам: " + t.months.map(([m, v]) => `${m}: доход ${money(v.inc)}, расходы ${money(v.exp)}`).join("; "));
   if (t.cats.length) L.push("Расходы по категориям: " + t.cats.map(([n, s]) => `${n} ${money(s)}`).join("; "));
-  if (data.goals.length) L.push("Цели: " + data.goals.map((g) => `${g.name} ${money(g.saved)} из ${money(g.target)}`).join("; "));
-  const hold = [...data.inv, ...data.crypto];
-  if (hold.length) L.push("Активы: " + hold.map((x) => `${x.name} вложено ${money(x.invested)}, сейчас ${money(x.value)}`).join("; "));
+  if (data.goals.length) {
+    L.push("Цели: " + data.goals.map((g) => `${g.name} ${money(sumOf(g.contribs))} из ${money(g.target)}${g.deadline ? `, срок ${g.deadline}` : ""}`).join("; "));
+  }
   L.push("", "Мой вопрос: ");
   return L.join("\n");
 }
@@ -136,6 +189,65 @@ const H = ({ children }: { children: React.ReactNode }) => (
 const Empty = ({ text }: { text: string }) => (
   <p className="border border-dashed border-line rounded-lg p-6 text-ink/70">{text}</p>
 );
+const P = ({ title, children, className = "" }: { title: string; children: React.ReactNode; className?: string }) => (
+  <div className={`bg-white border border-line rounded-lg p-4 md:p-5 ${className}`}>
+    <h3 className="font-display text-xl font-semibold mb-3">{title}</h3>
+    {children}
+  </div>
+);
+
+type Series = { name: string; color: string; values: number[]; neg?: string };
+function Chart({ labels, series, kind }: { labels: string[]; series: Series[]; kind: "bar" | "line" }) {
+  if (!labels.length) return <Empty text="Для графика пока недостаточно данных." />;
+  const W = 600, Hh = 220, L = 46, T = 10, B = 26;
+  let max = Math.max(0, ...series.flatMap((s) => s.values));
+  const min = Math.min(0, ...series.flatMap((s) => s.values));
+  if (max === min) max = min + 1;
+  const y = (v: number) => T + (Hh - T - B) * (1 - (v - min) / (max - min));
+  const step = (W - L - 6) / labels.length;
+  const cx = (i: number) => L + step * (i + 0.5);
+  const short = (v: number) => (Math.abs(v) >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`);
+  const skip = Math.ceil(labels.length / 8);
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${Hh}`} className="w-full" role="img">
+        {[0, 1, 2, 3].map((i) => {
+          const v = min + ((max - min) * i) / 3;
+          return (
+            <g key={i}>
+              <line x1={L} x2={W} y1={y(v)} y2={y(v)} stroke="#d5dae5" />
+              <text x={L - 6} y={y(v) + 4} textAnchor="end" fontSize="11" fill={C.ink} opacity=".6">{short(v)}</text>
+            </g>
+          );
+        })}
+        {labels.map((l, i) => i % skip === 0 && (
+          <text key={i} x={cx(i)} y={Hh - 8} textAnchor="middle" fontSize="11" fill={C.ink} opacity=".6">{l}</text>
+        ))}
+        {kind === "bar"
+          ? series.map((s, j) => s.values.map((v, i) => {
+              const bw = (step * 0.7) / series.length;
+              return (
+                <rect key={`${j}-${i}`} x={L + step * i + step * 0.15 + j * bw} y={y(Math.max(v, 0))} width={bw - 1}
+                  height={Math.max(Math.abs(y(v) - y(0)), 1)} rx="2" fill={v < 0 && s.neg ? s.neg : s.color} />
+              );
+            }))
+          : series.map((s, j) => (
+              <g key={j}>
+                <polyline fill="none" stroke={s.color} strokeWidth="2.5" points={s.values.map((v, i) => `${cx(i)},${y(v)}`).join(" ")} />
+                {s.values.map((v, i) => <circle key={i} cx={cx(i)} cy={y(v)} r="3" fill={s.color} />)}
+              </g>
+            ))}
+      </svg>
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm mt-1">
+        {series.map((s) => (
+          <span key={s.name} className="flex items-center gap-2">
+            <span className="inline-block w-3 h-3 rounded-sm" style={{ background: s.color }} />{s.name}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function Home() {
   const [tab, setTab] = useState<TabId>("dash");
@@ -145,7 +257,7 @@ export default function Home() {
   useEffect(() => {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) setData({ ...EMPTY, ...JSON.parse(raw) });
+      if (raw) setData(normalize(JSON.parse(raw)));
     } catch {}
     setReady(true);
   }, []);
@@ -168,9 +280,8 @@ export default function Home() {
         if (x.amount > 0) m.inc += x.amount; else m.exp -= x.amount;
       }
     }
-    const inv = data.inv.reduce((s, x) => s + x.value, 0);
-    const crypto = data.crypto.reduce((s, x) => s + x.value, 0);
-    const saved = data.goals.reduce((s, x) => s + x.saved, 0);
+    const inv = sumOf(data.inv), crypto = sumOf(data.crypto);
+    const saved = sumOf(data.goals.flatMap((g) => g.contribs));
     return {
       income, expenses, inv, crypto, saved, total: inv + crypto + saved,
       cats: Object.entries(byCat).sort((p, q) => q[1] - p[1]),
@@ -180,14 +291,14 @@ export default function Home() {
 
   return (
     <main className="min-h-screen md:flex">
-      <aside className="bg-ink text-paper p-4 md:p-6 md:w-60 md:h-screen md:sticky md:top-0 md:shrink-0">
+      <aside className="bg-ink text-paper p-4 md:p-6 md:w-60 md:h-screen md:sticky md:top-0 md:shrink-0 md:flex md:flex-col">
         <h1 className="font-display text-2xl font-semibold mb-4 md:mb-10">CapitalFlow</h1>
-        <nav className="flex md:flex-col gap-1 overflow-x-auto">
+        <nav className="flex md:flex-col md:flex-1 gap-1 overflow-x-auto">
           {TABS.map(([id, label]) => (
             <button
               key={id}
               onClick={() => setTab(id)}
-              className={`text-left whitespace-nowrap px-3 py-2 border-l-4 ${
+              className={`text-left whitespace-nowrap px-3 py-2 border-l-4 ${id === "stmt" ? "md:mt-auto" : ""} ${
                 tab === id ? "border-gold bg-white/10 font-bold" : "border-transparent hover:bg-white/5"
               }`}
             >
@@ -198,53 +309,52 @@ export default function Home() {
       </aside>
 
       <section className="flex-1 min-w-0 p-5 md:p-12 max-w-5xl space-y-8">
-        {tab === "dash" && <Dash t={t} empty={!data.txs.length && !data.inv.length && !data.crypto.length && !data.goals.length} go={setTab} />}
-        {tab === "stmt" && <Statements data={data} setData={setData} />}
-        {tab === "exp" && <Expenses t={t} />}
-        {tab === "inv" && <Holdings title="Инвестиции" items={data.inv} onChange={(inv) => setData({ ...data, inv })} namePh="Например: ETF S&P 500" />}
-        {tab === "crypto" && <Holdings title="Крипта" items={data.crypto} onChange={(crypto) => setData({ ...data, crypto })} namePh="Например: BTC" note="Цены вводятся вручную: актуальная стоимость в zł." />}
+        {tab === "dash" && (
+          <>
+            <Dash data={data} t={t} go={setTab} />
+            <LoanBlock loan={data.loan} capital={t.total} onClear={() => setData({ ...data, loan: null })} />
+          </>
+        )}
+        {tab === "exp" && <Expenses data={data} />}
+        {tab === "inv" && <Savings title="Инвестиции" items={data.inv} onChange={(inv) => setData({ ...data, inv })} namePh="Например: ETF S&P 500" />}
+        {tab === "crypto" && <Savings title="Крипта" items={data.crypto} onChange={(crypto) => setData({ ...data, crypto })} namePh="Например: BTC" />}
         {tab === "goals" && <Goals goals={data.goals} onChange={(goals) => setData({ ...data, goals })} />}
         {tab === "ai" && <Analyst data={data} t={t} />}
+        {tab === "stmt" && <Statements data={data} t={t} setData={setData} />}
       </section>
     </main>
   );
 }
 
-function Dash({ t, empty, go }: { t: Totals; empty: boolean; go: (t: TabId) => void }) {
-  const parts = [
-    ["Инвестиции", t.inv, "bg-ink"],
-    ["Крипта", t.crypto, "bg-gold"],
-    ["Накопления", t.saved, "bg-pos"],
-  ] as const;
+function Dash({ data, t, go }: { data: Data; t: Totals; go: (t: TabId) => void }) {
+  const empty = !data.txs.length && !data.inv.length && !data.crypto.length && !data.goals.length && !data.loan;
+  const parts = [["Инвестиции", t.inv, "bg-ink"], ["Крипта", t.crypto, "bg-gold"], ["Цели", t.saved, "bg-pos"]] as const;
+  const goalC = data.goals.flatMap((g) => g.contribs);
+  const axis = monthsOf([...data.txs, ...data.inv, ...data.crypto, ...goalC]);
+  const mm = Object.fromEntries(t.months) as Record<string, { inc: number; exp: number }>;
+  const inc = axis.map((m) => mm[m]?.inc ?? 0);
+  const exp = axis.map((m) => mm[m]?.exp ?? 0);
+  const labels = axis.map(mLabel);
   return (
     <>
       <div>
-        <p className="text-ink/70">Общий капитал</p>
+        <p className="text-ink/70">Общий капитал (инвестиции, крипта, цели)</p>
         <p className="font-display text-6xl md:text-8xl font-semibold tracking-tight">{money(t.total)}</p>
       </div>
 
       <div>
         <div className="flex h-3 rounded-full overflow-hidden bg-line grow">
-          {parts.map(([n, v, c]) => t.total > 0 && v > 0 && (
-            <div key={n} className={c} style={{ width: `${(v / t.total) * 100}%` }} />
-          ))}
+          {parts.map(([n, v, c]) => t.total > 0 && v > 0 && <div key={n} className={c} style={{ width: `${(v / t.total) * 100}%` }} />)}
         </div>
         <div className="flex flex-wrap gap-x-6 gap-y-1 mt-3">
           {parts.map(([n, v, c]) => (
-            <span key={n} className="flex items-center gap-2">
-              <span className={`inline-block w-3 h-3 rounded-sm ${c}`} />
-              {n} {money(v)}
-            </span>
+            <span key={n} className="flex items-center gap-2"><span className={`inline-block w-3 h-3 rounded-sm ${c}`} />{n} {money(v)}</span>
           ))}
         </div>
       </div>
 
       <div className="grid sm:grid-cols-3 border-y border-line divide-y sm:divide-y-0 sm:divide-x divide-line">
-        {[
-          ["Доходы по выпискам", t.income, "text-pos"],
-          ["Расходы по выпискам", t.expenses, "text-neg"],
-          ["Баланс", t.income - t.expenses, ""],
-        ].map(([l, v, c]) => (
+        {[["Доходы по выпискам", t.income, "text-pos"], ["Расходы по выпискам", t.expenses, "text-neg"], ["Баланс", t.income - t.expenses, ""]].map(([l, v, c]) => (
           <div key={l as string} className="py-5 sm:px-6 first:pl-0">
             <p className="text-ink/70">{l}</p>
             <p className={`font-display text-3xl font-semibold ${c}`}>{money(v as number)}</p>
@@ -252,22 +362,39 @@ function Dash({ t, empty, go }: { t: Totals; empty: boolean; go: (t: TabId) => v
         ))}
       </div>
 
-      {empty && (
+      {empty ? (
         <div className="bg-white border border-line rounded-lg p-6">
-          <p className="mb-4">Здесь пока пусто. Загрузите выписку или добавьте первые активы и цели.</p>
+          <p className="mb-4">Здесь пока пусто. Загрузите файл с операциями или добавьте первые взносы и цели.</p>
           <div className="flex flex-wrap gap-3">
-            <button className={btn} onClick={() => go("stmt")}>Загрузить выписку</button>
-            <button className={btn} onClick={() => go("inv")}>Добавить инвестиции</button>
+            <button className={btn} onClick={() => go("stmt")}>Загрузить данные</button>
+            <button className={btn} onClick={() => go("inv")}>Добавить взнос</button>
             <button className={btn} onClick={() => go("goals")}>Создать цель</button>
           </div>
+        </div>
+      ) : (
+        <div className="grid md:grid-cols-2 gap-5">
+          <P title="Доходы и расходы по месяцам">
+            <Chart kind="bar" labels={labels} series={[{ name: "Доходы", color: C.pos, values: inc }, { name: "Расходы", color: C.neg, values: exp }]} />
+          </P>
+          <P title="Сбережения за месяц (доход − расход)">
+            <Chart kind="bar" labels={labels} series={[{ name: "Сбережения", color: C.pos, neg: C.neg, values: inc.map((v, i) => v - exp[i]) }]} />
+          </P>
+          <P title="Накопления нарастающим итогом" className="md:col-span-2">
+            <Chart kind="line" labels={labels} series={[
+              { name: "Инвестиции", color: C.ink, values: axis.map((m) => cumAt(data.inv, m)) },
+              { name: "Крипта", color: C.gold, values: axis.map((m) => cumAt(data.crypto, m)) },
+              { name: "Цели", color: C.pos, values: axis.map((m) => cumAt(goalC, m)) },
+            ]} />
+          </P>
         </div>
       )}
     </>
   );
 }
 
-function Statements({ data, setData }: { data: Data; setData: (d: Data) => void }) {
+function Statements({ data, t, setData }: { data: Data; t: Totals; setData: (d: Data) => void }) {
   const [msg, setMsg] = useState<string | null>(null);
+  const period = t.months.length ? `${mLabel(t.months[0][0])} – ${mLabel(t.months[t.months.length - 1][0])}` : null;
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -277,8 +404,7 @@ function Statements({ data, setData }: { data: Data; setData: (d: Data) => void 
     try {
       const name = file.name.toLowerCase();
       const isXlsx = name.endsWith(".xlsx");
-      const isCsv = name.endsWith(".csv") || file.type.includes("csv");
-      if (!isCsv && !isXlsx) {
+      if (!isXlsx && !name.endsWith(".csv") && !file.type.includes("csv")) {
         setMsg(`Файл «${file.name}» не подходит. Поддерживаются CSV и XLSX (старый .xls сохраните как .xlsx).`);
         return;
       }
@@ -287,9 +413,10 @@ function Statements({ data, setData }: { data: Data; setData: (d: Data) => void 
       if (typeof res === "string") return setMsg(res);
       const key = (x: Tx) => `${x.date}|${x.desc}|${x.amount}`;
       const seen = new Set(data.txs.map(key));
-      const fresh = res.txs.filter((x) => !seen.has(key(x)));
-      setData({ ...data, txs: [...data.txs, ...fresh] });
-      setMsg(`Добавлено операций: ${fresh.length}, пропущено дублей: ${res.txs.length - fresh.length}. Колонки → ${res.cols}`);
+      const fresh = res.filter((x) => !seen.has(key(x)));
+      const loan = isXlsx ? await loanFromXlsx(buf) : null;
+      setData({ ...data, txs: [...data.txs, ...fresh], loan: loan ?? data.loan, file: file.name });
+      setMsg(`Готово: новых операций ${fresh.length}, повторов пропущено ${res.length - fresh.length}.${loan ? " Кредит импортирован." : ""}`);
     } catch (err) {
       setMsg("Ошибка при чтении файла: " + (err instanceof Error ? err.message : String(err)));
     }
@@ -297,117 +424,141 @@ function Statements({ data, setData }: { data: Data; setData: (d: Data) => void 
 
   return (
     <>
-      <H>Выписки</H>
+      <H>Загрузка данных</H>
       <div>
-        <label htmlFor="f" className="block mb-2">Загрузите выписку банка (CSV или XLSX). Файл читается в браузере и никуда не отправляется.</label>
+        <label htmlFor="f" className="block mb-2">Загрузите выписку или бюджет (CSV, XLSX). Файл читается в браузере и никуда не отправляется.</label>
         <input id="f" type="file" accept=".csv,.xlsx,text/csv" onChange={onFile} className={field + " max-w-md"} />
         {msg && <p className="mt-3 break-words text-ink/80">{msg}</p>}
       </div>
       {data.txs.length === 0 ? (
-        <Empty text="Операций пока нет. Выберите файл выше." />
+        <Empty text="Файл ещё не загружен." />
       ) : (
-        <>
-          <div className="overflow-x-auto bg-white border border-line rounded-lg">
-            <table className="w-full text-sm">
-              <thead className="text-left text-ink/60">
-                <tr><th className="p-3">Дата</th><th className="p-3">Описание</th><th className="p-3">Категория</th><th className="p-3 text-right">Сумма</th></tr>
-              </thead>
-              <tbody>
-                {data.txs.slice(-100).reverse().map((x) => (
-                  <tr key={x.id} className="border-t border-line">
-                    <td className="p-3 whitespace-nowrap">{x.date}</td>
-                    <td className="p-3">{x.desc}</td>
-                    <td className="p-3">{x.cat}</td>
-                    <td className={`p-3 text-right whitespace-nowrap ${x.amount < 0 ? "text-neg" : "text-pos"}`}>{money(x.amount)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-sm text-ink/60">Показаны последние 100 из {data.txs.length}.</p>
-          <button className="text-neg font-semibold" onClick={() => confirm("Удалить все операции?") && setData({ ...data, txs: [] })}>
+        <div className="bg-white border border-line rounded-lg p-5 space-y-2">
+          <p className="font-semibold text-pos">Файл загружен{data.file ? `: ${data.file}` : ""}</p>
+          <p>Операций: {data.txs.length}{period ? `, период ${period}` : ""}.</p>
+          <p className="text-ink/70 text-sm">Новый файл можно загрузить поверх: повторы пропускаются.</p>
+          <button className="text-neg font-semibold" onClick={() => confirm("Удалить все операции?") && setData({ ...data, txs: [], file: null })}>
             Удалить все операции
           </button>
-        </>
-      )}
-    </>
-  );
-}
-
-function Expenses({ t }: { t: Totals }) {
-  const max = t.cats[0]?.[1] ?? 1;
-  return (
-    <>
-      <H>Расходы</H>
-      {t.cats.length === 0 ? (
-        <Empty text="Загрузите выписку, и здесь появится разбивка по категориям." />
-      ) : (
-        <div>
-          <p className="text-ink/70 mb-4">Всего потрачено: {money(t.expenses)}</p>
-          {t.cats.map(([name, sum]) => (
-            <div key={name} className="py-3 border-b border-line">
-              <div className="flex justify-between mb-2">
-                <span className="font-semibold">{name}</span>
-                <span>{money(sum)} · {Math.round((sum / t.expenses) * 100)}%</span>
-              </div>
-              <div className="h-2 bg-line rounded-full"><div className="h-2 bg-ink rounded-full grow" style={{ width: `${(sum / max) * 100}%` }} /></div>
-            </div>
-          ))}
         </div>
       )}
     </>
   );
 }
 
-function Holdings({ title, items, onChange, namePh, note }: {
-  title: string; items: Holding[]; onChange: (h: Holding[]) => void; namePh: string; note?: string;
-}) {
+function Expenses({ data }: { data: Data }) {
+  const out = data.txs.filter((x) => x.amount < 0);
+  const months = monthsOf(out);
+  const [sel, setSel] = useState<string | null>(null);
+  if (!months.length) return <><H>Расходы</H><Empty text="Загрузите данные, и здесь появятся расходы по месяцам." /></>;
+  const cur = sel && months.includes(sel) ? sel : months[months.length - 1];
+  const sum = (m: string) => out.filter((x) => monthKey(x.date) === m).reduce((s, x) => s - x.amount, 0);
+  const list = out.filter((x) => monthKey(x.date) === cur);
+  const total = sum(cur);
+  const i = months.indexOf(cur);
+  const prev = i > 0 ? sum(months[i - 1]) : null;
+  const byCat: Record<string, number> = {};
+  list.forEach((x) => (byCat[x.cat] = (byCat[x.cat] ?? 0) - x.amount));
+  const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const ch = prev ? Math.round(((total - prev) / prev) * 100) : null;
+  return (
+    <>
+      <H>Расходы</H>
+      <P title="По месяцам">
+        <Chart kind="bar" labels={months.map(mLabel)} series={[{ name: "Расходы", color: C.neg, values: months.map(sum) }]} />
+      </P>
+      <div className="flex gap-2 overflow-x-auto">
+        {months.map((m) => (
+          <button key={m} onClick={() => setSel(m)} className={`px-4 py-2 rounded-full border whitespace-nowrap ${m === cur ? "bg-ink text-paper border-ink" : "bg-white border-line"}`}>
+            {mLabel(m)}
+          </button>
+        ))}
+      </div>
+      <div>
+        <p className="text-ink/70">Потрачено в {mLabel(cur)}</p>
+        <p className="font-display text-5xl font-semibold">{money(total)}</p>
+        {ch !== null && (
+          <p className={ch > 0 ? "text-neg" : "text-pos"}>{ch > 0 ? "+" : ""}{ch}% к прошлому месяцу ({money(prev as number)})</p>
+        )}
+      </div>
+      <div>
+        {cats.map(([name, s]) => (
+          <div key={name} className="py-3 border-b border-line">
+            <div className="flex justify-between mb-2"><span className="font-semibold">{name}</span><span>{money(s)} · {Math.round((s / total) * 100)}%</span></div>
+            <div className="h-2 bg-line rounded-full"><div className="h-2 bg-ink rounded-full grow" style={{ width: `${(s / cats[0][1]) * 100}%` }} /></div>
+          </div>
+        ))}
+      </div>
+      <P title="Крупнейшие траты месяца">
+        {[...list].sort((a, b) => a.amount - b.amount).slice(0, 5).map((x) => (
+          <div key={x.id} className="flex justify-between gap-3 py-2 border-b border-line last:border-0 text-sm">
+            <span className="min-w-0 truncate">{x.date} · {x.desc || x.cat}</span><span className="text-neg whitespace-nowrap">{money(-x.amount)}</span>
+          </div>
+        ))}
+      </P>
+    </>
+  );
+}
+
+function Savings({ title, items, onChange, namePh }: { title: string; items: Contrib[]; onChange: (c: Contrib[]) => void; namePh: string }) {
+  const [date, setDate] = useState(today());
   const [name, setName] = useState("");
-  const [invested, setInvested] = useState("");
-  const [value, setValue] = useState("");
+  const [amount, setAmount] = useState("");
 
   function add() {
-    const i = toNumber(invested), v = toNumber(value);
-    if (!name.trim() || i === null || v === null) return;
-    onChange([...items, { id: uid(), name: name.trim(), invested: i, value: v }]);
-    setName(""); setInvested(""); setValue("");
+    const a = toNumber(amount);
+    if (!name.trim() || !a || !date) return;
+    onChange([...items, { id: uid(), date, name: name.trim(), amount: a }]);
+    setName(""); setAmount("");
   }
 
-  const totalI = items.reduce((s, x) => s + x.invested, 0);
-  const totalV = items.reduce((s, x) => s + x.value, 0);
+  const total = sumOf(items);
+  const axis = monthsOf(items);
+  const byName: Record<string, number> = {};
+  items.forEach((x) => (byName[x.name] = (byName[x.name] ?? 0) + x.amount));
+  const names = Object.entries(byName).sort((a, b) => b[1] - a[1]);
+  const dl = "dl-" + title;
 
   return (
     <>
       <H>{title}</H>
-      {note && <p className="text-ink/70">{note}</p>}
+      <div>
+        <p className="text-ink/70">Накоплено</p>
+        <p className="font-display text-6xl font-semibold">{money(total)}</p>
+      </div>
+      {items.length > 0 && (
+        <P title="Рост накоплений">
+          <Chart kind="line" labels={axis.map(mLabel)} series={[{ name: "Накоплено", color: C.ink, values: axis.map((m) => cumAt(items, m)) }]} />
+        </P>
+      )}
       <div className="grid md:grid-cols-4 gap-3">
-        <input className={field} placeholder={namePh} value={name} onChange={(e) => setName(e.target.value)} />
-        <input className={field} placeholder="Вложено, zł" inputMode="decimal" value={invested} onChange={(e) => setInvested(e.target.value)} />
-        <input className={field} placeholder="Сейчас стоит, zł" inputMode="decimal" value={value} onChange={(e) => setValue(e.target.value)} />
-        <button className={btn} onClick={add}>Добавить</button>
+        <input type="date" className={field} value={date} onChange={(e) => setDate(e.target.value)} />
+        <input className={field} list={dl} placeholder={namePh} value={name} onChange={(e) => setName(e.target.value)} />
+        <datalist id={dl}>{names.map(([n]) => <option key={n} value={n} />)}</datalist>
+        <input className={field} placeholder="Сумма взноса, zł" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+        <button className={btn} onClick={add}>Добавить взнос</button>
       </div>
       {items.length === 0 ? (
-        <Empty text="Пока ничего не добавлено. Заполните поля выше." />
+        <Empty text="Взносов пока нет. Укажите дату, название и сумму." />
       ) : (
-        <div>
-          {items.map((x) => {
-            const pl = x.value - x.invested;
-            return (
-              <div key={x.id} className="py-4 border-b border-line flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="font-semibold">{x.name}</p>
-                  <p className="text-sm text-ink/60">Вложено {money(x.invested)}</p>
-                </div>
-                <div className="text-right">
-                  <p className="font-display text-2xl font-semibold">{money(x.value)}</p>
-                  <p className={`text-sm ${pl >= 0 ? "text-pos" : "text-neg"}`}>{pl >= 0 ? "+" : ""}{money(pl)}</p>
-                </div>
-                <button className="text-neg" onClick={() => onChange(items.filter((y) => y.id !== x.id))}>Удалить</button>
+        <>
+          <div>
+            {names.map(([n, s]) => (
+              <div key={n} className="py-3 border-b border-line">
+                <div className="flex justify-between mb-2"><span className="font-semibold">{n}</span><span>{money(s)} · {Math.round((s / total) * 100)}%</span></div>
+                <div className="h-2 bg-line rounded-full"><div className="h-2 bg-ink rounded-full grow" style={{ width: `${(s / names[0][1]) * 100}%` }} /></div>
               </div>
-            );
-          })}
-          <p className="pt-4">Итого {money(totalV)}, вложено {money(totalI)}, результат {money(totalV - totalI)}</p>
-        </div>
+            ))}
+          </div>
+          <P title="Последние взносы">
+            {[...items].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8).map((x) => (
+              <div key={x.id} className="flex justify-between items-center gap-3 py-2 border-b border-line last:border-0 text-sm">
+                <span>{fmtDate(x.date)} · {x.name}</span>
+                <span className="flex items-center gap-4"><b>{money(x.amount)}</b><button className="text-neg" onClick={() => onChange(items.filter((y) => y.id !== x.id))}>Удалить</button></span>
+              </div>
+            ))}
+          </P>
+        </>
       )}
     </>
   );
@@ -416,42 +567,81 @@ function Holdings({ title, items, onChange, namePh, note }: {
 function Goals({ goals, onChange }: { goals: Goal[]; onChange: (g: Goal[]) => void }) {
   const [name, setName] = useState("");
   const [target, setTarget] = useState("");
+  const [deadline, setDeadline] = useState("");
+  const upd = (id: string, p: Partial<Goal>) => onChange(goals.map((g) => (g.id === id ? { ...g, ...p } : g)));
 
   function add() {
     const n = toNumber(target);
-    if (!name.trim() || n === null || n <= 0) return;
-    onChange([...goals, { id: uid(), name: name.trim(), target: n, saved: 0 }]);
-    setName(""); setTarget("");
+    if (!name.trim() || !n || n <= 0) return;
+    onChange([...goals, { id: uid(), name: name.trim(), target: n, start: today(), deadline, contribs: [] }]);
+    setName(""); setTarget(""); setDeadline("");
   }
 
   function topUp(g: Goal) {
-    const n = toNumber(prompt("Сколько добавить, zł? (отрицательное число уменьшит сумму)") ?? "");
-    if (n === null) return;
-    onChange(goals.map((x) => (x.id === g.id ? { ...x, saved: Math.max(0, x.saved + n) } : x)));
+    const n = toNumber(prompt("Сколько внести, zł? (отрицательное число уменьшит сумму)") ?? "");
+    if (n) upd(g.id, { contribs: [...g.contribs, { id: uid(), date: today(), amount: n }] });
   }
 
   return (
     <>
       <H>Цели</H>
-      <div className="grid md:grid-cols-3 gap-3">
+      <div className="grid md:grid-cols-4 gap-3">
         <input className={field} placeholder="Например: Отпуск" value={name} onChange={(e) => setName(e.target.value)} />
         <input className={field} placeholder="Цель, zł" inputMode="decimal" value={target} onChange={(e) => setTarget(e.target.value)} />
+        <input type="date" className={field} value={deadline} onChange={(e) => setDeadline(e.target.value)} title="Срок" />
         <button className={btn} onClick={add}>Создать цель</button>
       </div>
       {goals.length === 0 ? (
-        <Empty text="Целей пока нет. Назовите первую и задайте сумму." />
+        <Empty text="Целей пока нет. Назовите цель, задайте сумму и срок." />
       ) : (
         goals.map((g) => {
-          const pct = Math.min(100, Math.round((g.saved / g.target) * 100));
+          const s = goalStats(g);
+          const tol = g.target * 0.02;
+          const status = s.rest === 0
+            ? ["Цель достигнута", "text-pos"]
+            : !s.hasDl ? ["", ""]
+            : s.diff > tol ? [`Опережаете график на ${money(s.diff)}`, "text-pos"]
+            : s.diff < -tol ? [`Отстаёте от графика на ${money(-s.diff)}`, "text-neg"]
+            : ["Идёте по графику", "text-gold"];
+          const nowKey = today().slice(0, 7);
+          const lbl = s.hasDl ? monthsBetween(g.start.slice(0, 7), g.deadline.slice(0, 7)) : [];
           return (
-            <div key={g.id} className="py-4 border-b border-line space-y-3">
+            <div key={g.id} className="bg-white border border-line rounded-lg p-5 space-y-4">
               <div className="flex justify-between flex-wrap gap-2">
                 <p className="font-display text-2xl font-semibold">{g.name}</p>
-                <p>{money(g.saved)} из {money(g.target)} · {pct}%</p>
+                <p>{money(s.saved)} из {money(g.target)} · {s.pct}%</p>
               </div>
-              <div className="h-3 bg-line rounded-full"><div className="h-3 bg-pos rounded-full grow" style={{ width: `${pct}%` }} /></div>
+              <div className="relative h-3 bg-line rounded-full">
+                <div className="h-3 bg-pos rounded-full grow" style={{ width: `${s.pct}%` }} />
+                {s.hasDl && <div className="absolute -top-1 h-5 w-0.5 bg-gold" style={{ left: `${Math.min(100, s.frac * 100)}%` }} title="Где вы должны быть по плану" />}
+              </div>
+              {status[0] && <p className={`font-semibold ${status[1]}`}>{status[0]}</p>}
+              {s.hasDl && s.rest > 0 && (
+                <div className="grid sm:grid-cols-3 gap-4">
+                  <div><p className="text-ink/70 text-sm">До {fmtDate(g.deadline)}</p><p className="font-display text-xl font-semibold">{s.daysLeft > 0 ? `${s.daysLeft} дн.` : "срок вышел"}</p></div>
+                  <div><p className="text-ink/70 text-sm">Нужно вносить в месяц</p><p className="font-display text-xl font-semibold">{money(s.need)}</p></div>
+                  <div><p className="text-ink/70 text-sm">Вносите сейчас в месяц</p><p className={`font-display text-xl font-semibold ${s.avg >= s.need ? "text-pos" : "text-neg"}`}>{money(s.avg)}</p></div>
+                </div>
+              )}
+              {s.hasDl && s.rest > 0 && s.forecast && (
+                <p className="text-sm text-ink/80">
+                  При текущем темпе цель будет достигнута около {fmtDate(s.forecast)}
+                  {s.forecast <= g.deadline ? ", то есть в срок." : ", то есть позже срока."}
+                </p>
+              )}
+              {!s.hasDl && (
+                <label className="text-sm block">Срок цели:{" "}
+                  <input type="date" className="bg-white border border-line rounded-md p-2 ml-2" onChange={(e) => upd(g.id, { deadline: e.target.value })} />
+                </label>
+              )}
+              {lbl.length > 1 && (
+                <Chart kind="line" labels={lbl.map(mLabel)} series={[
+                  { name: "План", color: C.gold, values: lbl.map((_, i) => (g.target * (i + 1)) / lbl.length) },
+                  { name: "Факт", color: C.pos, values: lbl.filter((l) => l <= nowKey).map((l) => cumAt(g.contribs, l)) },
+                ]} />
+              )}
               <div className="flex gap-5">
-                <button className="font-semibold" onClick={() => topUp(g)}>Пополнить</button>
+                <button className="font-semibold" onClick={() => topUp(g)}>Внести</button>
                 <button className="text-neg" onClick={() => onChange(goals.filter((x) => x.id !== g.id))}>Удалить</button>
               </div>
             </div>
@@ -465,18 +655,10 @@ function Goals({ goals, onChange }: { goals: Goal[]; onChange: (g: Goal[]) => vo
 function CopyBtn({ text }: { text: string }) {
   const [ok, setOk] = useState(false);
   return (
-    <button
-      className={btn}
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
-          setOk(true);
-          setTimeout(() => setOk(false), 2000);
-        } catch {
-          alert("Не удалось скопировать. Выделите текст вручную.");
-        }
-      }}
-    >
+    <button className={btn} onClick={async () => {
+      try { await navigator.clipboard.writeText(text); setOk(true); setTimeout(() => setOk(false), 2000); }
+      catch { alert("Не удалось скопировать. Выделите текст вручную."); }
+    }}>
       {ok ? "Скопировано" : "Скопировать сводку"}
     </button>
   );
@@ -492,64 +674,40 @@ function Analyst({ data, t }: { data: Data; t: Totals }) {
     const [[pm, p], [lm, l]] = t.months.slice(-2);
     if (p.exp > 0) {
       const ch = Math.round(((l.exp - p.exp) / p.exp) * 100);
-      tips.push(`Расходы в ${lm} ${ch >= 0 ? "выросли" : "снизились"} на ${Math.abs(ch)}% по сравнению с ${pm} (${money(l.exp)} против ${money(p.exp)}).`);
+      tips.push(`Расходы в ${mLabel(lm)} ${ch >= 0 ? "выросли" : "снизились"} на ${Math.abs(ch)}% по сравнению с ${mLabel(pm)} (${money(l.exp)} против ${money(p.exp)}).`);
     }
   }
   if (t.cats[0]) tips.push(`Больше всего уходит на «${t.cats[0][0]}»: ${money(t.cats[0][1])} (${Math.round((t.cats[0][1] / t.expenses) * 100)}% расходов).`);
-  const big = data.txs.filter((x) => x.amount < 0).sort((a, b) => a.amount - b.amount)[0];
-  if (big) tips.push(`Самая крупная трата: ${money(-big.amount)}${big.desc ? ` («${big.desc}»)` : ""}.`);
-  if (t.total > 0 && t.crypto / t.total > 0.3) tips.push(`Крипта составляет ${Math.round((t.crypto / t.total) * 100)}% капитала. Доля высокая, стоит оценить риск.`);
+  if (t.total > 0 && t.crypto / t.total > 0.3) tips.push(`Крипта составляет ${Math.round((t.crypto / t.total) * 100)}% накоплений. Доля высокая, стоит оценить риск.`);
   const subs = data.txs.filter((x) => x.cat === "Подписки" && x.amount < 0).reduce((s, x) => s - x.amount, 0);
   if (subs > 0) tips.push(`На подписки ушло ${money(subs)}. Проверьте, всеми ли вы пользуетесь.`);
-
-  const avgNet = t.months.length ? t.months.reduce((s, [, v]) => s + v.inc - v.exp, 0) / t.months.length : null;
   data.goals.forEach((g) => {
-    const rest = g.target - g.saved;
-    if (rest <= 0) return;
-    if (avgNet === null) tips.push(`Цель «${g.name}»: осталось ${money(rest)}.`);
-    else if (avgNet > 0) tips.push(`Цель «${g.name}»: осталось ${money(rest)}. При текущем темпе (+${money(avgNet)} в месяц) это примерно ${Math.ceil(rest / avgNet)} мес.`);
-    else tips.push(`Цель «${g.name}»: осталось ${money(rest)}, но расходы по выпискам превышают доходы, поэтому накопить при таком темпе не получится.`);
+    const s = goalStats(g);
+    if (s.rest <= 0) return;
+    tips.push(s.hasDl
+      ? `Цель «${g.name}»: осталось ${money(s.rest)}, нужно ${money(s.need)} в месяц, вы вносите ${money(s.avg)}. ${s.diff < 0 ? "Вы отстаёте от графика." : "Вы не отстаёте от графика."}`
+      : `Цель «${g.name}»: осталось ${money(s.rest)}. Задайте срок, и я посчитаю нужный темп.`);
   });
-
-  const summary = buildSummary(data, t);
+  const now = today().slice(0, 7);
+  const done = t.months.filter(([m]) => m !== now);
+  const avgInc = done.length ? done.reduce((s, [, v]) => s + v.inc, 0) / done.length : null;
+  tips.push(...loanTips(data.loan, avgInc));
+  const summary = withLoan(buildSummary(data, t), data.loan);
 
   return (
     <>
       <H>Аналитик</H>
       <p className="text-ink/70">Выводы считаются по правилам прямо в браузере. Это не нейросеть.</p>
       {tips.length === 0 ? (
-        <Empty text="Добавьте данные (выписку, активы, цели), и здесь появятся выводы." />
+        <Empty text="Добавьте данные (выписку, взносы, цели), и здесь появятся выводы." />
       ) : (
         <ul>{tips.map((s, i) => <li key={i} className="py-3 border-b border-line">{s}</li>)}</ul>
       )}
-
-      {t.months.length > 0 && (
-        <div>
-          <h3 className="font-display text-2xl font-semibold mb-2">По месяцам</h3>
-          <div className="overflow-x-auto bg-white border border-line rounded-lg">
-            <table className="w-full text-sm">
-              <thead className="text-left text-ink/60"><tr><th className="p-3">Месяц</th><th className="p-3 text-right">Доход</th><th className="p-3 text-right">Расходы</th><th className="p-3 text-right">Разница</th></tr></thead>
-              <tbody>
-                {t.months.map(([m, v]) => (
-                  <tr key={m} className="border-t border-line">
-                    <td className="p-3">{m}</td>
-                    <td className="p-3 text-right text-pos">{money(v.inc)}</td>
-                    <td className="p-3 text-right text-neg">{money(v.exp)}</td>
-                    <td className="p-3 text-right">{money(v.inc - v.exp)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      <div className="bg-white border border-line rounded-lg p-5 space-y-3">
-        <h3 className="font-display text-2xl font-semibold">Спросить ИИ</h3>
-        <p className="text-ink/70">Скопируйте сводку и вставьте её в чат с ИИ, затем задайте вопрос. В сводке только итоговые суммы, без названий магазинов и описаний операций.</p>
-        <pre className="whitespace-pre-wrap text-sm bg-paper rounded-md p-3 max-h-60 overflow-auto">{summary}</pre>
+      <P title="Спросить ИИ">
+        <p className="text-ink/70 mb-3">Скопируйте сводку и вставьте её в чат с ИИ, затем задайте вопрос. В сводке только итоговые суммы, без описаний операций.</p>
+        <pre className="whitespace-pre-wrap text-sm bg-paper rounded-md p-3 max-h-60 overflow-auto mb-3">{summary}</pre>
         <CopyBtn text={summary} />
-      </div>
+      </P>
     </>
   );
 }
