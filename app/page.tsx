@@ -379,17 +379,43 @@ function Goals({ goals, onChange }: { goals: Goal[]; onChange: (g: Goal[]) => vo
               </div>
               <div className="h-3 bg-slate-800 rounded"><div className="h-3 bg-green-500 rounded" style={{ width: `${pct}%` }} /></div>
               <div className="flex gap-4">
-                <button className={btnCls} onClick={() => topUp(g)}>Пополнить</button>
-                <button
-                  className="bg-red-600 hover:bg-red-500 px-4 py-3 rounded-lg font-semibold"
-                  onClick={() => onChange(goals.filter((x) => x.id !== g.id))}
-                >
-                  Удалить
-                </button>
+                <button className="text-blue-400" onClick={() => topUp(g)}>Пополнить</button>
+                <button className="text-red-400" onClick={() => onChange(goals.filter((x) => x.id !== g.id))}>Удалить</button>
               </div>
             </div>
           );
         })
+      )}
+    </>
+  );
+}
+
+function Analyst({ data, t }: { data: Data; t: Totals }) {
+  const tips: string[] = [];
+  if (t.income > 0) {
+    const rate = Math.round(((t.income - t.expenses) / t.income) * 100);
+    tips.push(`Норма сбережений по выпискам: ${rate}%. ${rate < 10 ? "Это низко, ориентир обычно 10–20%." : "Хороший уровень."}`);
+  }
+  if (t.cats[0]) tips.push(`Больше всего уходит на «${t.cats[0][0]}»: ${money(t.cats[0][1])} (${Math.round((t.cats[0][1] / t.expenses) * 100)}% расходов).`);
+  const big = data.txs.filter((x) => x.amount < 0).sort((a, b) => a.amount - b.amount)[0];
+  if (big) tips.push(`Самая крупная трата: ${money(-big.amount)}${big.desc ? ` («${big.desc}»)` : ""}.`);
+  if (t.total > 0 && t.crypto / t.total > 0.3) tips.push(`Крипта составляет ${Math.round((t.crypto / t.total) * 100)}% капитала. Доля высокая, стоит оценить риск.`);
+  const subs = data.txs.filter((x) => x.cat === "Подписки" && x.amount < 0).reduce((s, x) => s - x.amount, 0);
+  if (subs > 0) tips.push(`На подписки ушло ${money(subs)}. Проверьте, всеми ли вы пользуетесь.`);
+  data.goals.forEach((g) => g.saved < g.target && tips.push(`Цель «${g.name}»: осталось ${money(g.target - g.saved)}.`));
+
+  return (
+    <>
+      <h2 className="text-3xl md:text-4xl font-bold">🤖 Аналитик</h2>
+      <p className="text-slate-400">Простой анализ по правилам, считается локально в браузере. Это не нейросеть.</p>
+      {tips.length === 0 ? (
+        <Empty text="Добавьте данные (выписку, активы, цели), и здесь появятся выводы." />
+      ) : (
+        <ul className="space-y-3">
+          {tips.map((s, i) => (
+            <li key={i} className="bg-slate-900 p-4 rounded-xl">{s}</li>
+          ))}
+        </ul>
       )}
     </>
   );
