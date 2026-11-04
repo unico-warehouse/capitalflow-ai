@@ -25,7 +25,6 @@ const TABS = [
   ["goals", "Цели"], ["ai", "Аналитик"], ["stmt", "Загрузка данных"],
 ] as const;
 type TabId = (typeof TABS)[number][0];
-const C = { ink: "#17234d", gold: "#c9a227", pos: "#1e7a4f", neg: "#b3321f" };
 const MN = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
 const DAY = 86400000;
 
@@ -117,22 +116,11 @@ const monthKey = (d: string) => {
   m = /(\d{2})[-./](\d{2})[-./](\d{4})/.exec(d);
   return m ? `${m[3]}-${m[2]}` : null;
 };
-const cumAt = (items: { date: string; amount: number }[], m: string) =>
-  items.reduce((s, c) => ((monthKey(c.date) ?? "") <= m ? s + c.amount : s), 0);
 const sumOf = (items: { amount: number }[]) => items.reduce((s, c) => s + c.amount, 0);
+const inMonth = (items: { date: string; amount: number }[], m: string) =>
+  sumOf(items.filter((x) => monthKey(x.date) === m));
 const monthsOf = (items: { date: string }[]) =>
   [...new Set(items.map((x) => monthKey(x.date)).filter((k): k is string => !!k))].sort();
-
-function monthsBetween(a: string, b: string) {
-  const out: string[] = [];
-  let y = +a.slice(0, 4), m = +a.slice(5, 7);
-  const y2 = +b.slice(0, 4), m2 = +b.slice(5, 7);
-  while ((y < y2 || (y === y2 && m <= m2)) && out.length < 36) {
-    out.push(`${y}-${String(m).padStart(2, "0")}`);
-    if (++m > 12) { m = 1; y++; }
-  }
-  return out;
-}
 
 function normalize(raw: any): Data {
   const d: any = { ...EMPTY, ...raw };
@@ -160,7 +148,7 @@ function goalStats(g: Goal) {
   const monthsLeft = hasDl ? Math.max((end - now) / (30.44 * DAY), 0) : 0;
   const forecast = avg > 0 && rest > 0 ? new Date(now + (rest / avg) * 30.44 * DAY).toISOString().slice(0, 10) : null;
   return {
-    saved, rest, avg, pct, hasDl, planned, frac, forecast,
+    saved, rest, avg, pct, hasDl, frac, forecast,
     diff: saved - planned,
     daysLeft: hasDl ? Math.ceil((end - now) / DAY) : 0,
     need: hasDl ? (monthsLeft > 0 ? rest / monthsLeft : rest) : 0,
@@ -181,73 +169,24 @@ function buildSummary(data: Data, t: Totals) {
   return L.join("\n");
 }
 
-const field = "bg-white border border-line rounded-md p-3 w-full";
-const btn = "bg-ink text-paper rounded-md px-4 py-3 font-semibold hover:opacity-90";
+const field = "bg-white border border-line rounded-md p-2.5 w-full";
+const btn = "bg-ink text-paper rounded-md px-4 py-2.5 font-semibold hover:opacity-90";
 const H = ({ children }: { children: React.ReactNode }) => (
-  <h2 className="font-display text-4xl md:text-5xl font-semibold tracking-tight">{children}</h2>
+  <h2 className="font-display text-2xl md:text-3xl font-semibold tracking-tight">{children}</h2>
 );
 const Empty = ({ text }: { text: string }) => (
-  <p className="border border-dashed border-line rounded-lg p-6 text-ink/70">{text}</p>
+  <p className="border border-dashed border-line rounded-lg p-4 text-ink/70">{text}</p>
 );
 const P = ({ title, children, className = "" }: { title: string; children: React.ReactNode; className?: string }) => (
-  <div className={`bg-white border border-line rounded-lg p-4 md:p-5 ${className}`}>
-    <h3 className="font-display text-xl font-semibold mb-3">{title}</h3>
+  <div className={`bg-white border border-line rounded-lg p-4 ${className}`}>
+    <h3 className="font-display text-lg font-semibold mb-2">{title}</h3>
     {children}
   </div>
 );
-
-type Series = { name: string; color: string; values: number[]; neg?: string };
-function Chart({ labels, series, kind }: { labels: string[]; series: Series[]; kind: "bar" | "line" }) {
-  if (!labels.length) return <Empty text="Для графика пока недостаточно данных." />;
-  const W = 600, Hh = 220, L = 46, T = 10, B = 26;
-  let max = Math.max(0, ...series.flatMap((s) => s.values));
-  const min = Math.min(0, ...series.flatMap((s) => s.values));
-  if (max === min) max = min + 1;
-  const y = (v: number) => T + (Hh - T - B) * (1 - (v - min) / (max - min));
-  const step = (W - L - 6) / labels.length;
-  const cx = (i: number) => L + step * (i + 0.5);
-  const short = (v: number) => (Math.abs(v) >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`);
-  const skip = Math.ceil(labels.length / 8);
-  return (
-    <div>
-      <svg viewBox={`0 0 ${W} ${Hh}`} className="w-full" role="img">
-        {[0, 1, 2, 3].map((i) => {
-          const v = min + ((max - min) * i) / 3;
-          return (
-            <g key={i}>
-              <line x1={L} x2={W} y1={y(v)} y2={y(v)} stroke="#d5dae5" />
-              <text x={L - 6} y={y(v) + 4} textAnchor="end" fontSize="11" fill={C.ink} opacity=".6">{short(v)}</text>
-            </g>
-          );
-        })}
-        {labels.map((l, i) => i % skip === 0 && (
-          <text key={i} x={cx(i)} y={Hh - 8} textAnchor="middle" fontSize="11" fill={C.ink} opacity=".6">{l}</text>
-        ))}
-        {kind === "bar"
-          ? series.map((s, j) => s.values.map((v, i) => {
-              const bw = (step * 0.7) / series.length;
-              return (
-                <rect key={`${j}-${i}`} x={L + step * i + step * 0.15 + j * bw} y={y(Math.max(v, 0))} width={bw - 1}
-                  height={Math.max(Math.abs(y(v) - y(0)), 1)} rx="2" fill={v < 0 && s.neg ? s.neg : s.color} />
-              );
-            }))
-          : series.map((s, j) => (
-              <g key={j}>
-                <polyline fill="none" stroke={s.color} strokeWidth="2.5" points={s.values.map((v, i) => `${cx(i)},${y(v)}`).join(" ")} />
-                {s.values.map((v, i) => <circle key={i} cx={cx(i)} cy={y(v)} r="3" fill={s.color} />)}
-              </g>
-            ))}
-      </svg>
-      <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm mt-1">
-        {series.map((s) => (
-          <span key={s.name} className="flex items-center gap-2">
-            <span className="inline-block w-3 h-3 rounded-sm" style={{ background: s.color }} />{s.name}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
+const Bar = ({ pct, color = "bg-ink" }: { pct: number; color?: string }) => (
+  <div className="h-1.5 bg-line rounded-full"><div className={`h-1.5 rounded-full grow ${color}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} /></div>
+);
+const sign = (n: number) => (n > 0 ? "+" : "") + money(n);
 
 export default function Home() {
   const [tab, setTab] = useState<TabId>("dash");
@@ -290,9 +229,9 @@ export default function Home() {
   }, [data]);
 
   return (
-    <main className="min-h-screen md:flex">
-      <aside className="bg-ink text-paper p-4 md:p-6 md:w-60 md:h-screen md:sticky md:top-0 md:shrink-0 md:flex md:flex-col">
-        <h1 className="font-display text-2xl font-semibold mb-4 md:mb-10">CapitalFlow</h1>
+    <main className="min-h-screen md:flex text-[15px]">
+      <aside className="bg-ink text-paper p-3 md:p-4 md:w-48 md:h-screen md:sticky md:top-0 md:shrink-0 md:flex md:flex-col">
+        <h1 className="font-display text-xl font-semibold mb-3 md:mb-6 px-2">CapitalFlow</h1>
         <nav className="flex md:flex-col md:flex-1 gap-1 overflow-x-auto">
           {TABS.map(([id, label]) => (
             <button
@@ -308,12 +247,10 @@ export default function Home() {
         </nav>
       </aside>
 
-      <section className="flex-1 min-w-0 p-5 md:p-12 max-w-5xl space-y-8">
+      <section className="flex-1 min-w-0 p-4 md:p-6 space-y-5">
         {tab === "dash" && (
-          <>
-            <Dash data={data} t={t} go={setTab} />
-            <LoanBlock loan={data.loan} capital={t.total} onClear={() => setData({ ...data, loan: null })} />
-          </>
+          <Dash data={data} t={t} go={setTab}
+            extra={<LoanBlock loan={data.loan} capital={t.total} onClear={() => setData({ ...data, loan: null })} />} />
         )}
         {tab === "exp" && <Expenses data={data} />}
         {tab === "inv" && <Savings title="Инвестиции" items={data.inv} onChange={(inv) => setData({ ...data, inv })} namePh="Например: ETF S&P 500" />}
@@ -326,68 +263,77 @@ export default function Home() {
   );
 }
 
-function Dash({ data, t, go }: { data: Data; t: Totals; go: (t: TabId) => void }) {
+function Dash({ data, t, go, extra }: { data: Data; t: Totals; go: (t: TabId) => void; extra: React.ReactNode }) {
   const empty = !data.txs.length && !data.inv.length && !data.crypto.length && !data.goals.length && !data.loan;
   const parts = [["Инвестиции", t.inv, "bg-ink"], ["Крипта", t.crypto, "bg-gold"], ["Цели", t.saved, "bg-pos"]] as const;
   const goalC = data.goals.flatMap((g) => g.contribs);
-  const axis = monthsOf([...data.txs, ...data.inv, ...data.crypto, ...goalC]);
+  const axis = monthsOf([...data.txs, ...data.inv, ...data.crypto, ...goalC]).reverse();
   const mm = Object.fromEntries(t.months) as Record<string, { inc: number; exp: number }>;
-  const inc = axis.map((m) => mm[m]?.inc ?? 0);
-  const exp = axis.map((m) => mm[m]?.exp ?? 0);
-  const labels = axis.map(mLabel);
   return (
     <>
-      <div>
-        <p className="text-ink/70">Общий капитал (инвестиции, крипта, цели)</p>
-        <p className="font-display text-6xl md:text-8xl font-semibold tracking-tight">{money(t.total)}</p>
-      </div>
-
-      <div>
-        <div className="flex h-3 rounded-full overflow-hidden bg-line grow">
-          {parts.map(([n, v, c]) => t.total > 0 && v > 0 && <div key={n} className={c} style={{ width: `${(v / t.total) * 100}%` }} />)}
+      <div className="grid lg:grid-cols-2 gap-5 items-end">
+        <div>
+          <p className="text-ink/70">Общий капитал (инвестиции, крипта, цели)</p>
+          <p className="font-display text-4xl md:text-5xl font-semibold tracking-tight">{money(t.total)}</p>
+          <div className="flex h-2 rounded-full overflow-hidden bg-line grow mt-3">
+            {parts.map(([n, v, c]) => t.total > 0 && v > 0 && <div key={n} className={c} style={{ width: `${(v / t.total) * 100}%` }} />)}
+          </div>
+          <div className="flex flex-wrap gap-x-5 gap-y-1 mt-2 text-sm">
+            {parts.map(([n, v, c]) => (
+              <span key={n} className="flex items-center gap-2"><span className={`inline-block w-2.5 h-2.5 rounded-sm ${c}`} />{n} {money(v)}</span>
+            ))}
+          </div>
         </div>
-        <div className="flex flex-wrap gap-x-6 gap-y-1 mt-3">
-          {parts.map(([n, v, c]) => (
-            <span key={n} className="flex items-center gap-2"><span className={`inline-block w-3 h-3 rounded-sm ${c}`} />{n} {money(v)}</span>
+        <div className="grid grid-cols-3 divide-x divide-line border-y border-line">
+          {[["Доходы", t.income, "text-pos"], ["Расходы", t.expenses, "text-neg"], ["Баланс", t.income - t.expenses, ""]].map(([l, v, c]) => (
+            <div key={l as string} className="py-3 px-3 first:pl-0">
+              <p className="text-ink/70 text-sm">{l}</p>
+              <p className={`font-display text-xl font-semibold ${c}`}>{money(v as number)}</p>
+            </div>
           ))}
         </div>
       </div>
 
-      <div className="grid sm:grid-cols-3 border-y border-line divide-y sm:divide-y-0 sm:divide-x divide-line">
-        {[["Доходы по выпискам", t.income, "text-pos"], ["Расходы по выпискам", t.expenses, "text-neg"], ["Баланс", t.income - t.expenses, ""]].map(([l, v, c]) => (
-          <div key={l as string} className="py-5 sm:px-6 first:pl-0">
-            <p className="text-ink/70">{l}</p>
-            <p className={`font-display text-3xl font-semibold ${c}`}>{money(v as number)}</p>
-          </div>
-        ))}
-      </div>
-
-      {empty ? (
-        <div className="bg-white border border-line rounded-lg p-6">
-          <p className="mb-4">Здесь пока пусто. Загрузите файл с операциями или добавьте первые взносы и цели.</p>
-          <div className="flex flex-wrap gap-3">
+      {empty && (
+        <div className="bg-white border border-line rounded-lg p-4">
+          <p className="mb-3">Здесь пока пусто. Загрузите файл с операциями или добавьте первые взносы и цели.</p>
+          <div className="flex flex-wrap gap-2">
             <button className={btn} onClick={() => go("stmt")}>Загрузить данные</button>
             <button className={btn} onClick={() => go("inv")}>Добавить взнос</button>
             <button className={btn} onClick={() => go("goals")}>Создать цель</button>
           </div>
         </div>
-      ) : (
-        <div className="grid md:grid-cols-2 gap-5">
-          <P title="Доходы и расходы по месяцам">
-            <Chart kind="bar" labels={labels} series={[{ name: "Доходы", color: C.pos, values: inc }, { name: "Расходы", color: C.neg, values: exp }]} />
-          </P>
-          <P title="Сбережения за месяц (доход − расход)">
-            <Chart kind="bar" labels={labels} series={[{ name: "Сбережения", color: C.pos, neg: C.neg, values: inc.map((v, i) => v - exp[i]) }]} />
-          </P>
-          <P title="Накопления нарастающим итогом" className="md:col-span-2">
-            <Chart kind="line" labels={labels} series={[
-              { name: "Инвестиции", color: C.ink, values: axis.map((m) => cumAt(data.inv, m)) },
-              { name: "Крипта", color: C.gold, values: axis.map((m) => cumAt(data.crypto, m)) },
-              { name: "Цели", color: C.pos, values: axis.map((m) => cumAt(goalC, m)) },
-            ]} />
-          </P>
-        </div>
       )}
+
+      <div className="grid xl:grid-cols-2 gap-5 items-start">
+        {axis.length > 0 && (
+          <P title="Динамика по месяцам">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-left text-ink/60">
+                  <tr><th className="py-1.5 pr-2">Месяц</th><th className="px-2 text-right">Доходы</th><th className="px-2 text-right">Расходы</th><th className="px-2 text-right">Разница</th><th className="pl-2 text-right">Отложено</th></tr>
+                </thead>
+                <tbody>
+                  {axis.map((m) => {
+                    const inc = mm[m]?.inc ?? 0, exp = mm[m]?.exp ?? 0;
+                    const put = inMonth(data.inv, m) + inMonth(data.crypto, m) + inMonth(goalC, m);
+                    return (
+                      <tr key={m} className="border-t border-line">
+                        <td className="py-1.5 pr-2 font-semibold">{mLabel(m)}</td>
+                        <td className="px-2 text-right text-pos">{money(inc)}</td>
+                        <td className="px-2 text-right text-neg">{money(exp)}</td>
+                        <td className={`px-2 text-right font-semibold ${inc - exp >= 0 ? "text-pos" : "text-neg"}`}>{sign(inc - exp)}</td>
+                        <td className="pl-2 text-right">{money(put)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </P>
+        )}
+        <div className="space-y-5">{extra}</div>
+      </div>
     </>
   );
 }
@@ -425,23 +371,25 @@ function Statements({ data, t, setData }: { data: Data; t: Totals; setData: (d: 
   return (
     <>
       <H>Загрузка данных</H>
-      <div>
-        <label htmlFor="f" className="block mb-2">Загрузите выписку или бюджет (CSV, XLSX). Файл читается в браузере и никуда не отправляется.</label>
-        <input id="f" type="file" accept=".csv,.xlsx,text/csv" onChange={onFile} className={field + " max-w-md"} />
-        {msg && <p className="mt-3 break-words text-ink/80">{msg}</p>}
+      <div className="grid lg:grid-cols-2 gap-5 items-start">
+        <P title="Файл">
+          <label htmlFor="f" className="block mb-2 text-ink/80">CSV или XLSX (выписка или личный бюджет). Файл читается в браузере и никуда не отправляется.</label>
+          <input id="f" type="file" accept=".csv,.xlsx,text/csv" onChange={onFile} className={field} />
+          {msg && <p className="mt-3 break-words">{msg}</p>}
+        </P>
+        {data.txs.length === 0 ? (
+          <Empty text="Файл ещё не загружен." />
+        ) : (
+          <P title="Состояние">
+            <p className="font-semibold text-pos">Файл загружен{data.file ? `: ${data.file}` : ""}</p>
+            <p>Операций: {data.txs.length}{period ? `, период ${period}` : ""}.</p>
+            <p className="text-ink/70 text-sm mb-2">Новый файл можно загрузить поверх: повторы пропускаются.</p>
+            <button className="text-neg font-semibold" onClick={() => confirm("Удалить все операции?") && setData({ ...data, txs: [], file: null })}>
+              Удалить все операции
+            </button>
+          </P>
+        )}
       </div>
-      {data.txs.length === 0 ? (
-        <Empty text="Файл ещё не загружен." />
-      ) : (
-        <div className="bg-white border border-line rounded-lg p-5 space-y-2">
-          <p className="font-semibold text-pos">Файл загружен{data.file ? `: ${data.file}` : ""}</p>
-          <p>Операций: {data.txs.length}{period ? `, период ${period}` : ""}.</p>
-          <p className="text-ink/70 text-sm">Новый файл можно загрузить поверх: повторы пропускаются.</p>
-          <button className="text-neg font-semibold" onClick={() => confirm("Удалить все операции?") && setData({ ...data, txs: [], file: null })}>
-            Удалить все операции
-          </button>
-        </div>
-      )}
     </>
   );
 }
@@ -461,41 +409,43 @@ function Expenses({ data }: { data: Data }) {
   list.forEach((x) => (byCat[x.cat] = (byCat[x.cat] ?? 0) - x.amount));
   const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
   const ch = prev ? Math.round(((total - prev) / prev) * 100) : null;
+  const maxM = Math.max(...months.map(sum));
   return (
     <>
-      <H>Расходы</H>
-      <P title="По месяцам">
-        <Chart kind="bar" labels={months.map(mLabel)} series={[{ name: "Расходы", color: C.neg, values: months.map(sum) }]} />
-      </P>
-      <div className="flex gap-2 overflow-x-auto">
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <H>Расходы</H>
+        <div className="text-right">
+          <p className="text-ink/70 text-sm">Потрачено в {mLabel(cur)}</p>
+          <p className="font-display text-3xl font-semibold">{money(total)}</p>
+          {ch !== null && <p className={`text-sm ${ch > 0 ? "text-neg" : "text-pos"}`}>{ch > 0 ? "+" : ""}{ch}% к прошлому месяцу ({money(prev as number)})</p>}
+        </div>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         {months.map((m) => (
-          <button key={m} onClick={() => setSel(m)} className={`px-4 py-2 rounded-full border whitespace-nowrap ${m === cur ? "bg-ink text-paper border-ink" : "bg-white border-line"}`}>
-            {mLabel(m)}
+          <button key={m} onClick={() => setSel(m)} className={`text-left p-2.5 rounded-lg border ${m === cur ? "bg-ink text-paper border-ink" : "bg-white border-line hover:border-ink/40"}`}>
+            <p className="text-sm opacity-80">{mLabel(m)}</p>
+            <p className="font-semibold">{money(sum(m))}</p>
+            <div className="h-1 mt-1.5 rounded-full bg-current opacity-20"><div className="h-1 rounded-full bg-current" style={{ width: `${(sum(m) / maxM) * 100}%` }} /></div>
           </button>
         ))}
       </div>
-      <div>
-        <p className="text-ink/70">Потрачено в {mLabel(cur)}</p>
-        <p className="font-display text-5xl font-semibold">{money(total)}</p>
-        {ch !== null && (
-          <p className={ch > 0 ? "text-neg" : "text-pos"}>{ch > 0 ? "+" : ""}{ch}% к прошлому месяцу ({money(prev as number)})</p>
-        )}
+      <div className="grid lg:grid-cols-2 gap-5 items-start">
+        <P title="По категориям">
+          {cats.map(([name, s]) => (
+            <div key={name} className="py-2 border-b border-line last:border-0">
+              <div className="flex justify-between mb-1"><span className="font-semibold">{name}</span><span>{money(s)} · {Math.round((s / total) * 100)}%</span></div>
+              <Bar pct={(s / cats[0][1]) * 100} />
+            </div>
+          ))}
+        </P>
+        <P title="Крупнейшие траты месяца">
+          {[...list].sort((a, b) => a.amount - b.amount).slice(0, 8).map((x) => (
+            <div key={x.id} className="flex justify-between gap-3 py-1.5 border-b border-line last:border-0 text-sm">
+              <span className="min-w-0 truncate">{fmtDate(x.date)} · {x.desc || x.cat}</span><span className="text-neg whitespace-nowrap">{money(-x.amount)}</span>
+            </div>
+          ))}
+        </P>
       </div>
-      <div>
-        {cats.map(([name, s]) => (
-          <div key={name} className="py-3 border-b border-line">
-            <div className="flex justify-between mb-2"><span className="font-semibold">{name}</span><span>{money(s)} · {Math.round((s / total) * 100)}%</span></div>
-            <div className="h-2 bg-line rounded-full"><div className="h-2 bg-ink rounded-full grow" style={{ width: `${(s / cats[0][1]) * 100}%` }} /></div>
-          </div>
-        ))}
-      </div>
-      <P title="Крупнейшие траты месяца">
-        {[...list].sort((a, b) => a.amount - b.amount).slice(0, 5).map((x) => (
-          <div key={x.id} className="flex justify-between gap-3 py-2 border-b border-line last:border-0 text-sm">
-            <span className="min-w-0 truncate">{x.date} · {x.desc || x.cat}</span><span className="text-neg whitespace-nowrap">{money(-x.amount)}</span>
-          </div>
-        ))}
-      </P>
     </>
   );
 }
@@ -513,25 +463,23 @@ function Savings({ title, items, onChange, namePh }: { title: string; items: Con
   }
 
   const total = sumOf(items);
-  const axis = monthsOf(items);
+  const axis = monthsOf(items).reverse();
   const byName: Record<string, number> = {};
   items.forEach((x) => (byName[x.name] = (byName[x.name] ?? 0) + x.amount));
   const names = Object.entries(byName).sort((a, b) => b[1] - a[1]);
   const dl = "dl-" + title;
+  let run = total;
 
   return (
     <>
-      <H>{title}</H>
-      <div>
-        <p className="text-ink/70">Накоплено</p>
-        <p className="font-display text-6xl font-semibold">{money(total)}</p>
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <H>{title}</H>
+        <div className="text-right">
+          <p className="text-ink/70 text-sm">Накоплено</p>
+          <p className="font-display text-3xl font-semibold">{money(total)}</p>
+        </div>
       </div>
-      {items.length > 0 && (
-        <P title="Рост накоплений">
-          <Chart kind="line" labels={axis.map(mLabel)} series={[{ name: "Накоплено", color: C.ink, values: axis.map((m) => cumAt(items, m)) }]} />
-        </P>
-      )}
-      <div className="grid md:grid-cols-4 gap-3">
+      <div className="grid md:grid-cols-4 gap-2">
         <input type="date" className={field} value={date} onChange={(e) => setDate(e.target.value)} />
         <input className={field} list={dl} placeholder={namePh} value={name} onChange={(e) => setName(e.target.value)} />
         <datalist id={dl}>{names.map(([n]) => <option key={n} value={n} />)}</datalist>
@@ -541,24 +489,36 @@ function Savings({ title, items, onChange, namePh }: { title: string; items: Con
       {items.length === 0 ? (
         <Empty text="Взносов пока нет. Укажите дату, название и сумму." />
       ) : (
-        <>
-          <div>
+        <div className="grid xl:grid-cols-3 gap-5 items-start">
+          <P title="По названиям">
             {names.map(([n, s]) => (
-              <div key={n} className="py-3 border-b border-line">
-                <div className="flex justify-between mb-2"><span className="font-semibold">{n}</span><span>{money(s)} · {Math.round((s / total) * 100)}%</span></div>
-                <div className="h-2 bg-line rounded-full"><div className="h-2 bg-ink rounded-full grow" style={{ width: `${(s / names[0][1]) * 100}%` }} /></div>
-              </div>
-            ))}
-          </div>
-          <P title="Последние взносы">
-            {[...items].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8).map((x) => (
-              <div key={x.id} className="flex justify-between items-center gap-3 py-2 border-b border-line last:border-0 text-sm">
-                <span>{fmtDate(x.date)} · {x.name}</span>
-                <span className="flex items-center gap-4"><b>{money(x.amount)}</b><button className="text-neg" onClick={() => onChange(items.filter((y) => y.id !== x.id))}>Удалить</button></span>
+              <div key={n} className="py-2 border-b border-line last:border-0">
+                <div className="flex justify-between mb-1"><span className="font-semibold">{n}</span><span>{money(s)} · {Math.round((s / total) * 100)}%</span></div>
+                <Bar pct={(s / names[0][1]) * 100} />
               </div>
             ))}
           </P>
-        </>
+          <P title="По месяцам">
+            <table className="w-full text-sm">
+              <thead className="text-left text-ink/60"><tr><th className="py-1">Месяц</th><th className="text-right">Взнос</th><th className="text-right">Всего</th></tr></thead>
+              <tbody>
+                {axis.map((m) => {
+                  const v = inMonth(items, m), all = run;
+                  run -= v;
+                  return <tr key={m} className="border-t border-line"><td className="py-1.5">{mLabel(m)}</td><td className="text-right text-pos">{sign(v)}</td><td className="text-right font-semibold">{money(all)}</td></tr>;
+                })}
+              </tbody>
+            </table>
+          </P>
+          <P title="Последние взносы">
+            {[...items].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8).map((x) => (
+              <div key={x.id} className="flex justify-between items-center gap-3 py-1.5 border-b border-line last:border-0 text-sm">
+                <span className="min-w-0 truncate">{fmtDate(x.date)} · {x.name}</span>
+                <span className="flex items-center gap-3"><b>{money(x.amount)}</b><button className="text-neg" onClick={() => onChange(items.filter((y) => y.id !== x.id))}>Удалить</button></span>
+              </div>
+            ))}
+          </P>
+        </div>
       )}
     </>
   );
@@ -585,7 +545,7 @@ function Goals({ goals, onChange }: { goals: Goal[]; onChange: (g: Goal[]) => vo
   return (
     <>
       <H>Цели</H>
-      <div className="grid md:grid-cols-4 gap-3">
+      <div className="grid md:grid-cols-4 gap-2">
         <input className={field} placeholder="Например: Отпуск" value={name} onChange={(e) => setName(e.target.value)} />
         <input className={field} placeholder="Цель, zł" inputMode="decimal" value={target} onChange={(e) => setTarget(e.target.value)} />
         <input type="date" className={field} value={deadline} onChange={(e) => setDeadline(e.target.value)} title="Срок" />
@@ -594,59 +554,50 @@ function Goals({ goals, onChange }: { goals: Goal[]; onChange: (g: Goal[]) => vo
       {goals.length === 0 ? (
         <Empty text="Целей пока нет. Назовите цель, задайте сумму и срок." />
       ) : (
-        goals.map((g) => {
-          const s = goalStats(g);
-          const tol = g.target * 0.02;
-          const status = s.rest === 0
-            ? ["Цель достигнута", "text-pos"]
-            : !s.hasDl ? ["", ""]
-            : s.diff > tol ? [`Опережаете график на ${money(s.diff)}`, "text-pos"]
-            : s.diff < -tol ? [`Отстаёте от графика на ${money(-s.diff)}`, "text-neg"]
-            : ["Идёте по графику", "text-gold"];
-          const nowKey = today().slice(0, 7);
-          const lbl = s.hasDl ? monthsBetween(g.start.slice(0, 7), g.deadline.slice(0, 7)) : [];
-          return (
-            <div key={g.id} className="bg-white border border-line rounded-lg p-5 space-y-4">
-              <div className="flex justify-between flex-wrap gap-2">
-                <p className="font-display text-2xl font-semibold">{g.name}</p>
-                <p>{money(s.saved)} из {money(g.target)} · {s.pct}%</p>
-              </div>
-              <div className="relative h-3 bg-line rounded-full">
-                <div className="h-3 bg-pos rounded-full grow" style={{ width: `${s.pct}%` }} />
-                {s.hasDl && <div className="absolute -top-1 h-5 w-0.5 bg-gold" style={{ left: `${Math.min(100, s.frac * 100)}%` }} title="Где вы должны быть по плану" />}
-              </div>
-              {status[0] && <p className={`font-semibold ${status[1]}`}>{status[0]}</p>}
-              {s.hasDl && s.rest > 0 && (
-                <div className="grid sm:grid-cols-3 gap-4">
-                  <div><p className="text-ink/70 text-sm">До {fmtDate(g.deadline)}</p><p className="font-display text-xl font-semibold">{s.daysLeft > 0 ? `${s.daysLeft} дн.` : "срок вышел"}</p></div>
-                  <div><p className="text-ink/70 text-sm">Нужно вносить в месяц</p><p className="font-display text-xl font-semibold">{money(s.need)}</p></div>
-                  <div><p className="text-ink/70 text-sm">Вносите сейчас в месяц</p><p className={`font-display text-xl font-semibold ${s.avg >= s.need ? "text-pos" : "text-neg"}`}>{money(s.avg)}</p></div>
+        <div className="grid xl:grid-cols-2 gap-5 items-start">
+          {goals.map((g) => {
+            const s = goalStats(g);
+            const tol = g.target * 0.02;
+            const status = s.rest === 0
+              ? ["Цель достигнута", "text-pos"]
+              : !s.hasDl ? ["", ""]
+              : s.diff > tol ? [`Опережаете график на ${money(s.diff)}`, "text-pos"]
+              : s.diff < -tol ? [`Отстаёте от графика на ${money(-s.diff)}`, "text-neg"]
+              : ["Идёте по графику", "text-gold"];
+            return (
+              <div key={g.id} className="bg-white border border-line rounded-lg p-4 space-y-3">
+                <div className="flex justify-between flex-wrap gap-2">
+                  <p className="font-display text-xl font-semibold">{g.name}</p>
+                  <p>{money(s.saved)} из {money(g.target)} · {s.pct}%</p>
                 </div>
-              )}
-              {s.hasDl && s.rest > 0 && s.forecast && (
-                <p className="text-sm text-ink/80">
-                  При текущем темпе цель будет достигнута около {fmtDate(s.forecast)}
-                  {s.forecast <= g.deadline ? ", то есть в срок." : ", то есть позже срока."}
-                </p>
-              )}
-              {!s.hasDl && (
-                <label className="text-sm block">Срок цели:{" "}
-                  <input type="date" className="bg-white border border-line rounded-md p-2 ml-2" onChange={(e) => upd(g.id, { deadline: e.target.value })} />
-                </label>
-              )}
-              {lbl.length > 1 && (
-                <Chart kind="line" labels={lbl.map(mLabel)} series={[
-                  { name: "План", color: C.gold, values: lbl.map((_, i) => (g.target * (i + 1)) / lbl.length) },
-                  { name: "Факт", color: C.pos, values: lbl.filter((l) => l <= nowKey).map((l) => cumAt(g.contribs, l)) },
-                ]} />
-              )}
-              <div className="flex gap-5">
-                <button className="font-semibold" onClick={() => topUp(g)}>Внести</button>
-                <button className="text-neg" onClick={() => onChange(goals.filter((x) => x.id !== g.id))}>Удалить</button>
+                <div className="relative h-2.5 bg-line rounded-full">
+                  <div className="h-2.5 bg-pos rounded-full grow" style={{ width: `${s.pct}%` }} />
+                  {s.hasDl && <div className="absolute -top-1 h-4.5 w-0.5 bg-gold" style={{ left: `${Math.min(100, s.frac * 100)}%`, height: 18 }} title="Где вы должны быть по плану" />}
+                </div>
+                {status[0] && <p className={`font-semibold ${status[1]}`}>{status[0]}</p>}
+                {s.hasDl && s.rest > 0 && (
+                  <div className="grid grid-cols-3 gap-3">
+                    <div><p className="text-ink/70 text-xs">До {fmtDate(g.deadline)}</p><p className="font-semibold">{s.daysLeft > 0 ? `${s.daysLeft} дн.` : "срок вышел"}</p></div>
+                    <div><p className="text-ink/70 text-xs">Нужно в месяц</p><p className="font-semibold">{money(s.need)}</p></div>
+                    <div><p className="text-ink/70 text-xs">Вносите в месяц</p><p className={`font-semibold ${s.avg >= s.need ? "text-pos" : "text-neg"}`}>{money(s.avg)}</p></div>
+                  </div>
+                )}
+                {s.hasDl && s.rest > 0 && s.forecast && (
+                  <p className="text-sm text-ink/80">При текущем темпе цель будет достигнута около {fmtDate(s.forecast)}{s.forecast <= g.deadline ? ", то есть в срок." : ", то есть позже срока."}</p>
+                )}
+                {!s.hasDl && (
+                  <label className="text-sm block">Срок цели:{" "}
+                    <input type="date" className="bg-white border border-line rounded-md p-1.5 ml-2" onChange={(e) => upd(g.id, { deadline: e.target.value })} />
+                  </label>
+                )}
+                <div className="flex gap-5">
+                  <button className="font-semibold" onClick={() => topUp(g)}>Внести</button>
+                  <button className="text-neg" onClick={() => onChange(goals.filter((x) => x.id !== g.id))}>Удалить</button>
+                </div>
               </div>
-            </div>
-          );
-        })
+            );
+          })}
+        </div>
       )}
     </>
   );
@@ -698,16 +649,18 @@ function Analyst({ data, t }: { data: Data; t: Totals }) {
     <>
       <H>Аналитик</H>
       <p className="text-ink/70">Выводы считаются по правилам прямо в браузере. Это не нейросеть.</p>
-      {tips.length === 0 ? (
-        <Empty text="Добавьте данные (выписку, взносы, цели), и здесь появятся выводы." />
-      ) : (
-        <ul>{tips.map((s, i) => <li key={i} className="py-3 border-b border-line">{s}</li>)}</ul>
-      )}
-      <P title="Спросить ИИ">
-        <p className="text-ink/70 mb-3">Скопируйте сводку и вставьте её в чат с ИИ, затем задайте вопрос. В сводке только итоговые суммы, без описаний операций.</p>
-        <pre className="whitespace-pre-wrap text-sm bg-paper rounded-md p-3 max-h-60 overflow-auto mb-3">{summary}</pre>
-        <CopyBtn text={summary} />
-      </P>
+      <div className="grid xl:grid-cols-2 gap-5 items-start">
+        {tips.length === 0 ? (
+          <Empty text="Добавьте данные (выписку, взносы, цели), и здесь появятся выводы." />
+        ) : (
+          <P title="Выводы">{tips.map((s, i) => <p key={i} className="py-2 border-b border-line last:border-0">{s}</p>)}</P>
+        )}
+        <P title="Спросить ИИ">
+          <p className="text-ink/70 mb-2">Скопируйте сводку и вставьте её в чат с ИИ, затем задайте вопрос. В сводке только итоговые суммы, без описаний операций.</p>
+          <pre className="whitespace-pre-wrap text-sm bg-paper rounded-md p-3 max-h-60 overflow-auto mb-3">{summary}</pre>
+          <CopyBtn text={summary} />
+        </P>
+      </div>
     </>
   );
 }
