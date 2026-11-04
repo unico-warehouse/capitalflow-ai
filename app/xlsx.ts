@@ -1,4 +1,4 @@
-// Читает .xlsx без сторонних пакетов и превращает первый лист в CSV-текст.
+// Читает .xlsx без сторонних пакетов, находит лист с операциями и отдаёт его как CSV-текст.
 
 const dec = (s: string) =>
   s
@@ -55,28 +55,11 @@ const colIndex = (letters: string) => {
 const textOf = (xml: string) =>
   dec([...xml.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((x) => x[1]).join(""));
 
-export async function xlsxToCsv(buf: ArrayBuffer): Promise<string> {
-  const zip = readZip(buf);
-  const get = async (name: string) => {
-    const en = zip.get(name);
-    return en ? readText(buf, en) : "";
-  };
+const attr = (s: string, n: string) => new RegExp(`\\b${n}="([^"]*)"`).exec(s)?.[1];
 
-  const shared: string[] = [];
-  for (const m of (await get("xl/sharedStrings.xml")).matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)) {
-    shared.push(textOf(m[1]));
-  }
-
-  const sheetName = zip.has("xl/worksheets/sheet1.xml")
-    ? "xl/worksheets/sheet1.xml"
-    : [...zip.keys()].filter((k) => /^xl\/worksheets\/[^/]+\.xml$/.test(k)).sort()[0];
-  if (!sheetName) throw new Error("В файле нет листов");
-  const xml = await get(sheetName);
-
+function sheetRows(xml: string, shared: string[]): string[][] {
   const dateCols = new Set<number>();
-  // Первая «пустая» строка с множеством ; нужна, чтобы парсер выбрал разделитель ;
-  const lines: string[] = [";".repeat(60)];
-
+  const rows: string[][] = [];
   for (const rm of xml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
     const cells: string[] = [];
     for (const cm of rm[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
@@ -84,7 +67,7 @@ export async function xlsxToCsv(buf: ArrayBuffer): Promise<string> {
       const body = cm[2] ?? "";
       const ref = /\br="([A-Za-z]+)\d+"/.exec(attrs)?.[1];
       const idx = ref ? colIndex(ref) : cells.length;
-      const t = /\bt="(\w+)"/.exec(attrs)?.[1];
+      const t = attr(attrs, "t");
 
       let val = "";
       let isText = true;
@@ -111,9 +94,65 @@ export async function xlsxToCsv(buf: ArrayBuffer): Promise<string> {
       }
       cells[idx] = val;
     }
-    lines.push(
-      Array.from(cells, (c) => `"${(c ?? "").replace(/"/g, '""')}"`).join(";")
+    rows.push(Array.from(cells, (c) => c ?? ""));
+  }
+  return rows;
+}
+
+const hasAmount = (c: string) => /kwota|amount|сумма|wartość|wartosc/i.test(c);
+const hasDate = (c: string) => /data|date|дата/i.test(c);
+
+export async function xlsxToCsv(buf: ArrayBuffer): Promise<string> {
+  const zip = readZip(buf);
+  const get = async (name: string) => {
+    const en = zip.get(name);
+    return en ? readText(buf, en) : "";
+  };
+
+  const shared: string[] = [];
+  for (const m of (await get("xl/sharedStrings.xml")).matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)) {
+    shared.push(textOf(m[1]));
+  }
+
+  // Список листов в порядке книги: имя -> путь к файлу
+  const targets = new Map<string, string>();
+  for (const m of (await get("xl/_rels/workbook.xml.rels")).matchAll(/<Relationship\b[^>]*>/g)) {
+    const id = attr(m[0], "Id");
+    const tg = attr(m[0], "Target");
+    if (id && tg) targets.set(id, "xl/" + tg.replace(/^\/?(xl\/)?/, ""));
+  }
+  let sheets = [...(await get("xl/workbook.xml")).matchAll(/<sheet\b[^>]*>/g)].map((m) => ({
+    name: dec(attr(m[0], "name") ?? ""),
+    path: targets.get(attr(m[0], "r:id") ?? "") ?? "",
+  }));
+  sheets = sheets.filter((s) => zip.has(s.path));
+  if (!sheets.length) {
+    sheets = [...zip.keys()]
+      .filter((k) => /^xl\/worksheets\/[^/]+\.xml$/.test(k))
+      .sort()
+      .map((path, i) => ({ name: `Лист ${i + 1}`, path }));
+  }
+  if (!sheets.length) throw new Error("В файле нет листов");
+
+  // Ищем лист с таблицей операций: в одной строке заголовков есть и дата, и сумма
+  const found: { name: string; rows: string[][] }[] = [];
+  for (const s of sheets) {
+    const rows = sheetRows(await get(s.path), shared);
+    if (rows.some((r) => r.some(hasAmount) && r.some(hasDate))) found.push({ name: s.name, rows });
+  }
+  if (!found.length) {
+    throw new Error(
+      `Не нашёл лист с операциями: нужна таблица с колонками «Дата» и «Сумма». Листы в файле: ${sheets.map((s) => s.name).join(", ")}.`
     );
+  }
+  const pick =
+    found.find((f) => /журнал|операц|транзакц|выписк|operacj|transakcj|history|historia/i.test(f.name)) ??
+    found.sort((a, b) => b.rows.length - a.rows.length)[0];
+
+  // Первая «пустая» строка с множеством ; нужна, чтобы парсер выбрал разделитель ;
+  const lines = [";".repeat(60)];
+  for (const r of pick.rows) {
+    lines.push(r.map((c) => `"${c.replace(/"/g, '""')}"`).join(";"));
   }
   return lines.join("\n");
 }
