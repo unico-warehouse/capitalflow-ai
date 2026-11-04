@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { xlsxToCsv } from "./xlsx";
 
 type Tx = { id: string; date: string; desc: string; amount: number; cat: string };
 type Holding = { id: string; name: string; invested: number; value: number };
@@ -74,21 +75,27 @@ function toNumber(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function parseStatement(text: string): Tx[] | string {
-  const rows = parseCSV(text);
+function parseStatement(text: string): { txs: Tx[]; cols: string } | string {
+  const rows = parseCSV(text.replace(/^\uFEFF/, ""));
+  if (!rows.length) return "Файл пустой.";
   const hi = rows.findIndex((r) => r.some((c) => AMOUNT.some((k) => c.toLowerCase().includes(k))));
-  if (hi < 0) return "Не нашёл колонку с суммой (kwota / amount / сумма) в файле.";
-  const h = rows[hi].map((c) => c.toLowerCase());
+  if (hi < 0) {
+    return `Не нашёл колонку с суммой (kwota / amount / сумма). Заголовки в первой строке: ${rows[0].join(" | ").slice(0, 200)}`;
+  }
+  const headers = rows[hi];
+  const h = headers.map((c) => c.toLowerCase());
   const col = (keys: string[]) => h.findIndex((c) => keys.some((k) => c.includes(k)));
   const a = col(AMOUNT), d = col(DESC), dt = col(DATEK);
-  const out: Tx[] = [];
+  const txs: Tx[] = [];
   for (const r of rows.slice(hi + 1)) {
     const amount = toNumber(r[a] ?? "");
     if (amount === null || amount === 0) continue;
     const desc = (d >= 0 ? r[d] ?? "" : "").trim().slice(0, 90);
-    out.push({ id: uid(), date: dt >= 0 ? (r[dt] ?? "").trim() : "", desc, amount, cat: categorize(desc) });
+    txs.push({ id: uid(), date: dt >= 0 ? (r[dt] ?? "").trim() : "", desc, amount, cat: categorize(desc) });
   }
-  return out.length ? out : "Не нашёл ни одной операции в файле.";
+  if (!txs.length) return "Колонку суммы нашёл, но ни одной операции не распознал.";
+  const cols = `сумма: «${headers[a]}», описание: «${d >= 0 ? headers[d] : "не найдено"}», дата: «${dt >= 0 ? headers[dt] : "не найдена"}»`;
+  return { txs, cols };
 }
 
 function decode(buf: ArrayBuffer) {
@@ -216,23 +223,40 @@ function Statements({ data, setData }: { data: Data; setData: (d: Data) => void 
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".csv")) return setMsg("Пока поддерживается только CSV.");
-    const res = parseStatement(decode(await file.arrayBuffer()));
-    if (typeof res === "string") return setMsg(res);
-    const key = (x: Tx) => `${x.date}|${x.desc}|${x.amount}`;
-    const seen = new Set(data.txs.map(key));
-    const fresh = res.filter((x) => !seen.has(key(x)));
-    setData({ ...data, txs: [...data.txs, ...fresh] });
-    setMsg(`Добавлено операций: ${fresh.length}, пропущено дублей: ${res.length - fresh.length}.`);
+    setMsg(`Читаю файл «${file.name}»…`);
+    try {
+      const name = file.name.toLowerCase();
+      const isXlsx = name.endsWith(".xlsx");
+      const isCsv = name.endsWith(".csv") || file.type.includes("csv");
+      if (!isCsv && !isXlsx) {
+        setMsg(`Файл «${file.name}» не подходит. Поддерживаются CSV и XLSX (старый .xls сохраните как .xlsx).`);
+        return;
+      }
+      const buf = await file.arrayBuffer();
+      const res = parseStatement(isXlsx ? await xlsxToCsv(buf) : decode(buf));
+      if (typeof res === "string") {
+        setMsg(res);
+        return;
+      }
+      const key = (x: Tx) => `${x.date}|${x.desc}|${x.amount}`;
+      const seen = new Set(data.txs.map(key));
+      const fresh = res.txs.filter((x) => !seen.has(key(x)));
+      setData({ ...data, txs: [...data.txs, ...fresh] });
+      setMsg(
+        `Добавлено операций: ${fresh.length}, пропущено дублей: ${res.txs.length - fresh.length}. Колонки → ${res.cols}`
+      );
+    } catch (err) {
+      setMsg("Ошибка при чтении файла: " + (err instanceof Error ? err.message : String(err)));
+    }
   }
 
   return (
     <>
       <h2 className="text-3xl md:text-4xl font-bold">📄 Выписки</h2>
       <div>
-        <label htmlFor="f" className="block mb-2">Загрузить выписку банка (CSV). Файл обрабатывается в браузере и никуда не отправляется.</label>
-        <input id="f" type="file" accept=".csv" onChange={onFile} className="bg-slate-800 p-3 rounded-lg" />
-        {msg && <p className="mt-3 text-slate-300">{msg}</p>}
+        <label htmlFor="f" className="block mb-2">Загрузить выписку банка (CSV или XLSX). Файл обрабатывается в браузере и никуда не отправляется.</label>
+        <input id="f" type="file" accept=".csv,.xlsx,text/csv" onChange={onFile} className="bg-slate-800 p-3 rounded-lg" />
+        {msg && <p className="mt-3 text-slate-300 break-words">{msg}</p>}
       </div>
       {data.txs.length === 0 ? (
         <Empty text="Операций пока нет." />
