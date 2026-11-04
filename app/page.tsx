@@ -74,27 +74,21 @@ function toNumber(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function parseStatement(text: string): { txs: Tx[]; cols: string } | string {
-  const rows = parseCSV(text.replace(/^\uFEFF/, ""));
-  if (!rows.length) return "Файл пустой.";
+function parseStatement(text: string): Tx[] | string {
+  const rows = parseCSV(text);
   const hi = rows.findIndex((r) => r.some((c) => AMOUNT.some((k) => c.toLowerCase().includes(k))));
-  if (hi < 0) {
-    return `Не нашёл колонку с суммой (kwota / amount / сумма). Заголовки в первой строке: ${rows[0].join(" | ").slice(0, 200)}`;
-  }
-  const headers = rows[hi];
-  const h = headers.map((c) => c.toLowerCase());
+  if (hi < 0) return "Не нашёл колонку с суммой (kwota / amount / сумма) в файле.";
+  const h = rows[hi].map((c) => c.toLowerCase());
   const col = (keys: string[]) => h.findIndex((c) => keys.some((k) => c.includes(k)));
   const a = col(AMOUNT), d = col(DESC), dt = col(DATEK);
-  const txs: Tx[] = [];
+  const out: Tx[] = [];
   for (const r of rows.slice(hi + 1)) {
     const amount = toNumber(r[a] ?? "");
     if (amount === null || amount === 0) continue;
     const desc = (d >= 0 ? r[d] ?? "" : "").trim().slice(0, 90);
-    txs.push({ id: uid(), date: dt >= 0 ? (r[dt] ?? "").trim() : "", desc, amount, cat: categorize(desc) });
+    out.push({ id: uid(), date: dt >= 0 ? (r[dt] ?? "").trim() : "", desc, amount, cat: categorize(desc) });
   }
-  if (!txs.length) return "Колонку суммы нашёл, но ни одной операции не распознал.";
-  const cols = `сумма: «${headers[a]}», описание: «${d >= 0 ? headers[d] : "не найдено"}», дата: «${dt >= 0 ? headers[dt] : "не найдена"}»`;
-  return { txs, cols };
+  return out.length ? out : "Не нашёл ни одной операции в файле.";
 }
 
 function decode(buf: ArrayBuffer) {
@@ -222,28 +216,14 @@ function Statements({ data, setData }: { data: Data; setData: (d: Data) => void 
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    setMsg(`Читаю файл «${file.name}»…`);
-    try {
-      const isCsv = file.name.toLowerCase().endsWith(".csv") || file.type.includes("csv");
-      if (!isCsv) {
-        setMsg(`Файл «${file.name}» не похож на CSV. Пока поддерживается только CSV.`);
-        return;
-      }
-      const res = parseStatement(decode(await file.arrayBuffer()));
-      if (typeof res === "string") {
-        setMsg(res);
-        return;
-      }
-      const key = (x: Tx) => `${x.date}|${x.desc}|${x.amount}`;
-      const seen = new Set(data.txs.map(key));
-      const fresh = res.txs.filter((x) => !seen.has(key(x)));
-      setData({ ...data, txs: [...data.txs, ...fresh] });
-      setMsg(
-        `Добавлено операций: ${fresh.length}, пропущено дублей: ${res.txs.length - fresh.length}. Колонки → ${res.cols}`
-      );
-    } catch (err) {
-      setMsg("Ошибка при чтении файла: " + (err instanceof Error ? err.message : String(err)));
-    }
+    if (!file.name.toLowerCase().endsWith(".csv")) return setMsg("Пока поддерживается только CSV.");
+    const res = parseStatement(decode(await file.arrayBuffer()));
+    if (typeof res === "string") return setMsg(res);
+    const key = (x: Tx) => `${x.date}|${x.desc}|${x.amount}`;
+    const seen = new Set(data.txs.map(key));
+    const fresh = res.filter((x) => !seen.has(key(x)));
+    setData({ ...data, txs: [...data.txs, ...fresh] });
+    setMsg(`Добавлено операций: ${fresh.length}, пропущено дублей: ${res.length - fresh.length}.`);
   }
 
   return (
@@ -251,8 +231,8 @@ function Statements({ data, setData }: { data: Data; setData: (d: Data) => void 
       <h2 className="text-3xl md:text-4xl font-bold">📄 Выписки</h2>
       <div>
         <label htmlFor="f" className="block mb-2">Загрузить выписку банка (CSV). Файл обрабатывается в браузере и никуда не отправляется.</label>
-        <input id="f" type="file" accept=".csv,text/csv" onChange={onFile} className="bg-slate-800 p-3 rounded-lg" />
-        {msg && <p className="mt-3 text-slate-300 break-words">{msg}</p>}
+        <input id="f" type="file" accept=".csv" onChange={onFile} className="bg-slate-800 p-3 rounded-lg" />
+        {msg && <p className="mt-3 text-slate-300">{msg}</p>}
       </div>
       {data.txs.length === 0 ? (
         <Empty text="Операций пока нет." />
